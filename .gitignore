@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.bak
+*.hidden
+*.tgz
+.DS_Store
+.claude/

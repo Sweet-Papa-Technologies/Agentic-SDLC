@@ -1,0 +1,37 @@
+{
+  "_comment": "Default gate behavior. Sane, strict-but-runnable defaults. Edit per-gate options under 'gates'. Thresholds and banned patterns live here; orchestration (enabled/tier/command/endpoint) lives in gates.config.",
+
+  "gates": {
+    "spec-lint": {
+      "spec_file": "REQUIREMENTS.md",
+      "id_pattern": "REQ-\\d+",
+      "acceptance_label": "Acceptance"
+    },
+    "trace-gate": {
+      "spec_file": "REQUIREMENTS.md",
+      "id_pattern": "REQ-\\d+",
+      "test_reqs": "TEST-REQS.yaml"
+    },
+    "redgreen-gate": {
+      "test_command": null,
+      "timeout_seconds": 600
+    },
+    "intent-gate": {
+      "test_launchers": ["it", "test", "fit", "xit", "specify"],
+      "assertion_roots": ["should"],
+      "banned_mocks": [],
+      "allow_snapshot_only": false,
+      "fail_on": ["assertion-free", "trivial"]
+    },
+    "separation-gate": {
+      "manifest": null
+    },
+    "semantic-test-judge": {
+      "spec_file": "REQUIREMENTS.md",
+      "escalate_below": 0.6
+    },
+    "fresh-eyes-review": {
+      "spec_file": "REQUIREMENTS.md"
+    }
+  }
+}

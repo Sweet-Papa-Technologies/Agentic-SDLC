@@ -1,0 +1,94 @@
+#!/usr/bin/env python3
+"""
+redgreen-gate — Phase 2 + Phase 3 exit gate (language-agnostic via configured command).
+
+Runs the configured test command and checks the suite is in the expected state:
+  --expect red    tests must FAIL  (Phase 2: tests written, no code yet)
+  --expect green  tests must PASS  (Phase 3/4: code implemented)        [default]
+
+"Red for the right reason" check: when expecting red, a non-zero exit that looks
+like a collection/syntax/import error (rather than assertion failures) is flagged
+as a finding — tests should fail because behavior is missing, not because they
+don't load. Heuristic and configurable; never blocks on its own.
+
+Contract: see references/gate-contract.md
+Config keys (policy.gates.redgreen-gate):
+  test_command      shell command to run the suite      (REQUIRED to do real work)
+  red_for_reason    regexes that indicate a "wrong" red (collection error, etc.)
+  timeout_seconds   max run time                        (default 600)
+"""
+import os
+import re
+import subprocess
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import gatelib  # noqa: E402
+
+GATE, TIER = "redgreen-gate", 0
+DEFAULT_WRONG_RED = [
+    r"SyntaxError", r"ImportError", r"ModuleNotFoundError", r"Cannot find module",
+    r"No tests? (ran|found|collected)", r"collected 0 items", r"command not found",
+    r"ReferenceError", r"is not defined",
+]
+
+
+def main():
+    argv = list(sys.argv[1:])
+    expect = "green"
+    if "--expect" in argv:
+        i = argv.index("--expect")
+        if i + 1 < len(argv):
+            expect = argv[i + 1].strip().lower()
+        del argv[i:i + 2]
+
+    _p, args = gatelib.parse_args(argv)
+    policy = gatelib.load_policy(args)
+    opts = gatelib.gate_options(policy, GATE)
+    root = args.context or "."
+
+    cmd = opts.get("test_command")
+    if not cmd:
+        gatelib.emit(GATE, TIER, "skip",
+                     "no test_command configured (set policy.gates.redgreen-gate.test_command)")
+
+    timeout = int(opts.get("timeout_seconds", 600))
+    try:
+        proc = subprocess.run(cmd, shell=True, cwd=root, timeout=timeout,
+                              capture_output=True, text=True)
+    except subprocess.TimeoutExpired:
+        gatelib.emit(GATE, TIER, "fail", "test command timed out after %ds" % timeout,
+                     [gatelib.finding("high", cmd, "Suite did not finish in %ds." % timeout)])
+        return
+
+    passed = proc.returncode == 0
+    combined = (proc.stdout or "") + "\n" + (proc.stderr or "")
+    findings = []
+
+    if expect == "red":
+        if passed:
+            gatelib.emit(GATE, TIER, "fail",
+                         "expected RED but suite passed — code may already exist or tests assert nothing",
+                         [gatelib.finding("high", cmd, "Tests passed before implementation. Author≠Judge separation or empty tests suspected.")],
+                         confidence=1.0)
+        wrong = [re.compile(p, re.IGNORECASE) for p in opts.get("red_for_reason", DEFAULT_WRONG_RED)]
+        hits = sorted({p.pattern for p in wrong if p.search(combined)})
+        if hits:
+            findings.append(gatelib.finding(
+                "med", cmd, "Suite is red but the failure looks like load/collection error, not missing behavior: %s" % ", ".join(hits)))
+            gatelib.emit(GATE, TIER, "escalate",
+                         "RED, but possibly for the wrong reason", findings, confidence=0.6)
+        gatelib.emit(GATE, TIER, "pass", "suite is RED as expected (pre-implementation)", confidence=1.0)
+    else:  # green
+        if passed:
+            gatelib.emit(GATE, TIER, "pass", "suite is GREEN as expected", confidence=1.0)
+        tail = "\n".join(combined.strip().splitlines()[-8:])
+        gatelib.emit(GATE, TIER, "fail", "expected GREEN but suite failed (exit %d)" % proc.returncode,
+                     [gatelib.finding("high", cmd, "Test command failed.\n" + tail)], confidence=1.0)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as exc:  # noqa: BLE001
+        gatelib.fail_internal(GATE, TIER, exc)

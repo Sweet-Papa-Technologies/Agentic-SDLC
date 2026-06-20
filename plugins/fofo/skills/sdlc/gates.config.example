@@ -1,0 +1,43 @@
+{
+  "_comment": "Copy to 'gates.config' at your repo root and adapt. This is the ONE place you point gates at your stack. A fresh install runs the language-agnostic gates immediately; every bring-your-own and heavy gate is disabled until you wire it up.",
+
+  "policy": "policy.json",
+  "fail_fast": true,
+
+  "model": {
+    "_comment": "Used only by the Tier 1 AI-judge gates. Anthropic Messages shape by default; set base_url to point at any compatible proxy. The API key is read from the env var NAMED here — never put a key in this file.",
+    "endpoint": "https://api.anthropic.com/v1/messages",
+    "base_url": null,
+    "model": "claude-sonnet-4-6",
+    "api_key_env": "ANTHROPIC_API_KEY",
+    "max_tokens": 1024,
+    "timeout_seconds": 60
+  },
+
+  "gates": [
+    { "name": "spec-lint",        "tier": 0, "enabled": true,  "script": "spec-lint" },
+    { "name": "trace-gate",       "tier": 0, "enabled": true,  "script": "trace-gate" },
+    { "name": "redgreen-gate",    "tier": 0, "enabled": true,  "script": "redgreen-gate",
+      "_note": "Set policy.gates.redgreen-gate.test_command to your suite. The runner expects GREEN; run with --expect red in Phase 2." },
+    { "name": "intent-gate",      "tier": 0, "enabled": true,  "script": "intent-gate",
+      "_note": "Kept JS/TS analyzer. For other languages, point this at your own contract-conformant analyzer via 'command'." },
+    { "name": "separation-gate",  "tier": 0, "enabled": false, "script": "separation-gate",
+      "_note": "Enable once you maintain a PROVENANCE manifest to enforce Author != Judge." },
+
+    { "name": "lint",             "tier": 0, "enabled": false,
+      "command": ["./scripts/adapter", "--name", "lint", "--tier", "0", "--", "echo", "configure-your-linter"],
+      "_note": "BYO. Wrap any pass/fail linter with adapter, or point at a tool that emits contract JSON." },
+    { "name": "coverage",         "tier": 0, "enabled": false,
+      "command": ["./scripts/adapter", "--name", "coverage", "--tier", "0", "--", "echo", "configure-coverage"],
+      "_note": "BYO. e.g. adapter -- pytest --cov --cov-fail-under=80" },
+    { "name": "mutation",         "tier": 0, "enabled": false,
+      "command": ["./scripts/adapter", "--name", "mutation", "--tier", "0", "--", "echo", "configure-mutation"],
+      "waivable": true,
+      "_note": "BYO + EXPENSIVE. Point at your mutation tool. A failure escalates (waivable) instead of hard-stopping." },
+
+    { "name": "semantic-test-judge", "tier": 1, "enabled": false, "script": "semantic-test-judge",
+      "_note": "Needs model config above + the api_key_env to be set." },
+    { "name": "fresh-eyes-review",   "tier": 1, "enabled": false, "script": "fresh-eyes-review",
+      "_note": "Needs model config above + the api_key_env to be set." }
+  ]
+}

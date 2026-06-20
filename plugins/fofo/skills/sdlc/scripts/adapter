@@ -1,0 +1,66 @@
+#!/usr/bin/env python3
+"""
+adapter — wrap a plain pass/fail command into a contract verdict.
+
+For the simplest bring-your-own case: a tool that exits 0 on success and non-zero
+on failure but does NOT emit contract JSON. Use it in gates.config as the
+`command` for a BYO gate, or call it directly:
+
+    adapter --name lint --tier 0 -- eslint src/
+    adapter --name coverage --tier 0 --fail-exit 1 -- pytest --cov --cov-fail-under=80
+
+Everything after `--` is the wrapped command, run as-is. Its exit code maps to a
+verdict: 0 -> pass, non-zero -> fail (or escalate with --on-fail escalate). The
+last lines of its output become the finding detail.
+
+This is the ONLY wrapper shipped. It is tool-agnostic on purpose — no mutation,
+coverage, or lint tool is hardcoded anywhere in this skill.
+"""
+import argparse
+import subprocess
+import sys
+import os
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import gatelib  # noqa: E402
+
+
+def main():
+    p = argparse.ArgumentParser(add_help=True)
+    p.add_argument("--name", required=True, help="Gate name to report.")
+    p.add_argument("--tier", type=int, default=0)
+    p.add_argument("--on-fail", choices=["fail", "escalate"], default="fail")
+    p.add_argument("--changed", action="append", default=[])
+    p.add_argument("--policy", default=None)
+    p.add_argument("--context", default=".")
+    p.add_argument("--config", default=None)
+    known, rest = p.parse_known_args()
+
+    if "--" in rest:
+        cmd = rest[rest.index("--") + 1:]
+    else:
+        cmd = rest
+    if not cmd:
+        gatelib.fail_internal(known.name, known.tier, "no wrapped command given after --")
+
+    try:
+        proc = subprocess.run(cmd, cwd=known.context or ".", capture_output=True, text=True)
+    except FileNotFoundError as exc:
+        gatelib.emit(known.name, known.tier, "skip", "command not available: %s" % exc)
+        return
+
+    tail = "\n".join(((proc.stdout or "") + (proc.stderr or "")).strip().splitlines()[-10:])
+    if proc.returncode == 0:
+        gatelib.emit(known.name, known.tier, "pass", "%s passed" % " ".join(cmd), confidence=1.0)
+    status = known.on_fail
+    gatelib.emit(known.name, known.tier, status,
+                 "%s exited %d" % (" ".join(cmd), proc.returncode),
+                 [gatelib.finding("high", " ".join(cmd), tail or "command failed")],
+                 confidence=1.0)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as exc:  # noqa: BLE001
+        gatelib.fail_internal("adapter", 0, exc)

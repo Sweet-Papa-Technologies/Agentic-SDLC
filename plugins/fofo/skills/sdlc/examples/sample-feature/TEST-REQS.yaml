@@ -1,0 +1,4 @@
+REQ-001:
+  - intent: spaces become single hyphens and letters are lowercased
+REQ-002:
+  - intent: empty string throws an Error, returns no value

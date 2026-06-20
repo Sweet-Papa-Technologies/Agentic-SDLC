@@ -1,0 +1,4 @@
+units:
+  - unit: slugify
+    tests_by: judge-ctx-2026-06-20T09:00
+    code_by: author-ctx-2026-06-20T10:15

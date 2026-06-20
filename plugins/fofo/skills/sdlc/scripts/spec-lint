@@ -1,0 +1,92 @@
+#!/usr/bin/env python3
+"""
+spec-lint — Phase 0 exit gate.
+
+Checks: every requirement in REQUIREMENTS.md (or the configured spec file) has a
+stable ID and at least one acceptance criterion. Deterministic, no network.
+
+Contract: see references/gate-contract.md
+Config keys (policy.gates.spec-lint):
+  spec_file        path to the requirements doc          (default "REQUIREMENTS.md")
+  id_pattern       regex matching a requirement ID        (default "REQ-\\d+")
+  acceptance_label label that introduces acceptance text  (default "Acceptance")
+
+Convention recognised by default:
+    ### REQ-001: Title
+    Acceptance: <criterion>            # or a "- Acceptance:" bullet, or an
+                                       #   "Acceptance Criteria" sub-list below.
+"""
+import os
+import re
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import gatelib  # noqa: E402
+
+GATE, TIER = "spec-lint", 0
+
+
+def main():
+    _p, args = gatelib.parse_args()
+    policy = gatelib.load_policy(args)
+    opts = gatelib.gate_options(policy, GATE)
+
+    spec_file = opts.get("spec_file", "REQUIREMENTS.md")
+    id_re = re.compile(opts.get("id_pattern", r"REQ-\d+"))
+    acc_label = opts.get("acceptance_label", "Acceptance")
+
+    path = spec_file if os.path.isabs(spec_file) else os.path.join(args.context or ".", spec_file)
+    if not os.path.isfile(path):
+        gatelib.emit(GATE, TIER, "fail",
+                     "spec file not found: %s" % spec_file,
+                     [gatelib.finding("high", spec_file, "Phase 0 requires a requirements document with IDs + acceptance criteria.")])
+
+    text = gatelib.read_text(path)
+    lines = text.splitlines()
+
+    # Find requirement headings: a line containing an ID, treated as a block start.
+    blocks = []  # (req_id, start_line_index)
+    for i, line in enumerate(lines):
+        m = id_re.search(line)
+        # Treat as a requirement declaration only on heading/bold/list lines or "ID:".
+        if m and (line.lstrip().startswith(("#", "-", "*", ">")) or re.search(re.escape(m.group(0)) + r"\s*[:.)\-]", line)):
+            blocks.append((m.group(0), i))
+
+    findings = []
+    if not blocks:
+        gatelib.emit(GATE, TIER, "fail",
+                     "no requirement IDs found in %s" % spec_file,
+                     [gatelib.finding("high", spec_file, "Expected requirement IDs matching /%s/." % id_re.pattern)])
+
+    acc_re = re.compile(r"\b" + re.escape(acc_label), re.IGNORECASE)
+    seen = {}
+    for idx, (rid, start) in enumerate(blocks):
+        end = blocks[idx + 1][1] if idx + 1 < len(blocks) else len(lines)
+        body = "\n".join(lines[start:end])
+        loc = "%s:%d" % (spec_file, start + 1)
+        if rid in seen:
+            findings.append(gatelib.finding("med", loc, "Duplicate requirement ID '%s' (first at line %d)." % (rid, seen[rid])))
+        else:
+            seen[rid] = start + 1
+        if not acc_re.search(body):
+            findings.append(gatelib.finding("high", loc, "Requirement '%s' has no '%s' criterion." % (rid, acc_label)))
+
+    high = [f for f in findings if f["severity"] == "high"]
+    if high:
+        gatelib.emit(GATE, TIER, "fail",
+                     "%d requirement(s) missing IDs/acceptance criteria" % len(high),
+                     findings, confidence=1.0)
+    if findings:
+        gatelib.emit(GATE, TIER, "escalate",
+                     "spec lint passed with %d warning(s)" % len(findings),
+                     findings, confidence=0.7)
+    gatelib.emit(GATE, TIER, "pass",
+                 "%d requirement(s), all with IDs + acceptance criteria" % len(blocks),
+                 confidence=1.0)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as exc:  # noqa: BLE001
+        gatelib.fail_internal(GATE, TIER, exc)

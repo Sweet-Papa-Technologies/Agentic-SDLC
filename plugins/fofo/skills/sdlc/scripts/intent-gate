@@ -1,0 +1,433 @@
+#!/usr/bin/env node
+/*
+ * intent-gate — Tier 0 anti-gaming gate for JS/TS test files (the kept reference impl).
+ *
+ * Catches tests that "pass" without asserting intent:
+ *   - assertion-free   : a test body with no assertion at all
+ *   - trivial          : only trivially-true assertions, e.g. expect(true).toBe(true),
+ *                        expect(1).toEqual(1), assert(true), expect(x).toBeDefined() on a literal
+ *   - snapshot-only    : only toMatchSnapshot / toMatchInlineSnapshot (asserts nothing about intent)
+ *   - banned mock      : a mock/stub API the policy forbids appears in a test
+ *
+ * Two engines, chosen automatically per file; the user installs nothing:
+ *   1. AST (preferred) — a real ESTree tree from acorn, VENDORED in
+ *      scripts/vendor/acorn.js (ships with the skill; no npm, no runtime network).
+ *      Test calls and assertions are matched against AST node shapes.
+ *   2. Tokens (fallback) — a hand-written tokenizer (strings, template literals,
+ *      comments, and regex literals are real tokens, so their contents never trip
+ *      detection) walking test-block bodies by brace matching. Used whenever acorn
+ *      can't parse a file (TypeScript type syntax, JSX, decorators) or the vendored
+ *      parser is absent. Both engines feed one shared classifier, so verdicts match.
+ *
+ * The JSON contract is the documented surface — other languages drop in their own
+ * parser and emit the same JSON (see references/porting-to-other-languages.md). A
+ * project wanting full TS-type fidelity can point gates.config at an
+ * acorn-typescript/typescript-backed analyzer; the contract is identical.
+ *
+ * Contract: see references/gate-contract.md
+ * Config keys (policy.gates.intent-gate):
+ *   test_launchers     names that open a test    (default it,test,fit,xit,specify)
+ *   assertion_roots    extra assertion identifiers beyond expect/assert/should
+ *   banned_mocks       regex strings forbidden inside tests (default [])
+ *   allow_snapshot_only  default false (snapshot-only -> finding)
+ *   fail_on            categories that are hard fails (default assertion-free,trivial)
+ */
+"use strict";
+
+const fs = require("fs");
+const path = require("path");
+
+const GATE = "intent-gate";
+const TIER = 0;
+const TS_EXT = new Set([".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts"]);
+const STATUS_EXIT = { pass: 0, fail: 1, escalate: 2, skip: 3 };
+
+// ---------- contract I/O ----------
+function emit(status, summary, findings, confidence) {
+  const obj = { gate: GATE, tier: TIER, status, summary, findings: findings || [], confidence: +(confidence || 0).toFixed(3) };
+  process.stdout.write(JSON.stringify(obj) + "\n");
+  process.exit(STATUS_EXIT[status] !== undefined ? STATUS_EXIT[status] : 10);
+}
+function failInternal(message) {
+  process.stdout.write(JSON.stringify({ gate: GATE, tier: TIER, status: "error", summary: "gate internal error: " + message, findings: [], confidence: 0 }) + "\n");
+  process.exit(10);
+}
+function finding(severity, location, detail) { return { severity, location, detail }; }
+
+// ---------- vendored AST engine (ships with the skill; zero user install) ----------
+// intent-gate prefers a real ESTree AST (acorn, bundled in scripts/vendor/) and
+// falls back to the built-in token analyzer for any file acorn can't parse
+// (TypeScript type syntax, JSX, decorators). Nothing to install: if the vendored
+// file is missing, the token analyzer is used for everything.
+let _acorn;
+function loadParser() {
+  if (_acorn !== undefined) return _acorn;
+  try { _acorn = require(path.join(__dirname, "vendor", "acorn.js")); }
+  catch (e) { _acorn = null; }
+  return _acorn;
+}
+// Generic ESTree walker: calls visit(node) for every node with a string `type`.
+function walk(node, visit) {
+  if (!node || typeof node !== "object") return;
+  if (Array.isArray(node)) { for (const c of node) walk(c, visit); return; }
+  if (typeof node.type === "string") visit(node);
+  for (const k in node) {
+    if (k === "type" || k === "start" || k === "end" || k === "loc" || k === "range") continue;
+    const v = node[k];
+    if (v && typeof v === "object") walk(v, visit);
+  }
+}
+
+// ---------- arg parsing (standard contract) ----------
+function parseArgs(argv) {
+  const a = { changed: [], policy: null, context: ".", config: null };
+  for (let i = 0; i < argv.length; i++) {
+    const k = argv[i];
+    if (k === "--changed") a.changed.push(argv[++i]);
+    else if (k === "--policy") a.policy = argv[++i];
+    else if (k === "--context") a.context = argv[++i];
+    else if (k === "--config") a.config = argv[++i];
+  }
+  return a;
+}
+function loadJson(p) { try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch (e) { return null; } }
+function splitPatterns(list) {
+  const out = [];
+  for (const item of list || []) for (const c of String(item).replace(/,/g, " ").split(/\s+/)) if (c) out.push(c);
+  return out;
+}
+function globToRe(seg) {
+  return new RegExp("^" + seg.replace(/[.+^${}()|\\]/g, "\\$&").replace(/\*/g, "[^/]*").replace(/\?/g, ".") + "$");
+}
+function walkMatch(base, segs) {
+  if (segs.length === 0) return [];
+  const [seg, ...rest] = segs;
+  let entries = [];
+  try { entries = fs.readdirSync(base, { withFileTypes: true }); } catch (e) { return []; }
+  let out = [];
+  if (seg === "**") {
+    out = out.concat(walkMatch(base, rest.length ? rest : ["*"]));
+    for (const e of entries) if (e.isDirectory()) out = out.concat(walkMatch(path.join(base, e.name), segs));
+    return out;
+  }
+  const re = globToRe(seg);
+  for (const e of entries) {
+    if (!re.test(e.name)) continue;
+    const full = path.join(base, e.name);
+    if (rest.length === 0) { if (e.isFile()) out.push(full); }
+    else if (e.isDirectory()) out = out.concat(walkMatch(full, rest));
+  }
+  return out;
+}
+// Expand --changed patterns into existing files (mirrors gatelib.expand_changed).
+function expandChanged(list, root) {
+  const out = new Set();
+  for (const pat of splitPatterns(list)) {
+    if (/[*?[\]]/.test(pat)) {
+      const absGlob = path.isAbsolute(pat);
+      const base = absGlob ? "/" : root;
+      for (const f of walkMatch(base, pat.replace(/^\//, "").split("/").filter(Boolean))) out.add(path.normalize(f));
+      continue;
+    }
+    const abs = path.isAbsolute(pat) ? pat : path.join(root, pat);
+    try {
+      const st = fs.statSync(abs);
+      if (st.isFile()) out.add(path.normalize(abs));
+      else if (st.isDirectory()) for (const f of walkMatch(abs, ["**", "*"])) out.add(path.normalize(f));
+    } catch (e) { /* missing path: skip */ }
+  }
+  return [...out];
+}
+
+// ---------- tokenizer ----------
+// Token: {t: 'name'|'punct'|'string'|'template'|'regex'|'comment'|'number', v, line}
+function tokenize(src) {
+  const tokens = [];
+  let i = 0, line = 1;
+  const n = src.length;
+  const prevSignificant = () => {
+    for (let k = tokens.length - 1; k >= 0; k--) {
+      if (tokens[k].t !== "comment") return tokens[k];
+    }
+    return null;
+  };
+  const regexAllowed = () => {
+    const p = prevSignificant();
+    if (!p) return true;
+    if (p.t === "number" || p.t === "string" || p.t === "template" || p.t === "regex") return false;
+    if (p.t === "name") return ["return", "typeof", "instanceof", "in", "of", "new", "delete", "void", "do", "else", "yield", "await", "case"].includes(p.v);
+    if (p.t === "punct") return !([")", "]", "}"].includes(p.v));
+    return true;
+  };
+  while (i < n) {
+    const c = src[i];
+    if (c === "\n") { line++; i++; continue; }
+    if (c === " " || c === "\t" || c === "\r") { i++; continue; }
+    // comments
+    if (c === "/" && src[i + 1] === "/") { let j = i + 2; while (j < n && src[j] !== "\n") j++; tokens.push({ t: "comment", v: src.slice(i, j), line }); i = j; continue; }
+    if (c === "/" && src[i + 1] === "*") { let j = i + 2; while (j < n && !(src[j] === "*" && src[j + 1] === "/")) { if (src[j] === "\n") line++; j++; } j += 2; tokens.push({ t: "comment", v: src.slice(i, j), line }); i = j; continue; }
+    // strings
+    if (c === '"' || c === "'") { const startLine = line; let j = i + 1; while (j < n && src[j] !== c) { if (src[j] === "\\") j++; else if (src[j] === "\n") line++; j++; } j++; tokens.push({ t: "string", v: src.slice(i, j), line: startLine }); i = j; continue; }
+    // template literal (handles ${ } with nested braces/strings/templates)
+    if (c === "`") { const startLine = line; let j = i + 1, depth = 0; while (j < n) { const ch = src[j]; if (ch === "\n") line++; if (ch === "\\") { j += 2; continue; } if (depth === 0 && ch === "`") { j++; break; } if (ch === "$" && src[j + 1] === "{") { depth++; j += 2; continue; } if (depth > 0 && ch === "{") { depth++; j++; continue; } if (depth > 0 && ch === "}") { depth--; j++; continue; } j++; } tokens.push({ t: "template", v: src.slice(i, j), line: startLine }); i = j; continue; }
+    // regex literal
+    if (c === "/" && regexAllowed()) { let j = i + 1, inClass = false, ok = true; while (j < n) { const ch = src[j]; if (ch === "\n") { ok = false; break; } if (ch === "\\") { j += 2; continue; } if (ch === "[") inClass = true; else if (ch === "]") inClass = false; else if (ch === "/" && !inClass) break; j++; } if (ok && src[j] === "/") { j++; while (j < n && /[a-z]/i.test(src[j])) j++; tokens.push({ t: "regex", v: src.slice(i, j), line }); i = j; continue; } }
+    // number
+    if (/[0-9]/.test(c) || (c === "." && /[0-9]/.test(src[i + 1]))) { let j = i; while (j < n && /[0-9a-fx_.eE+-]/.test(src[j]) && !(src[j] === "+" && !/[eE]/.test(src[j - 1]))) j++; tokens.push({ t: "number", v: src.slice(i, j), line }); i = j; continue; }
+    // identifier / keyword
+    if (/[A-Za-z_$]/.test(c)) { let j = i + 1; while (j < n && /[A-Za-z0-9_$]/.test(src[j])) j++; tokens.push({ t: "name", v: src.slice(i, j), line }); i = j; continue; }
+    // punctuation (multi-char operators we care about: =>, ., (, ), {, }, comma)
+    if (c === "=" && src[i + 1] === ">") { tokens.push({ t: "punct", v: "=>", line }); i += 2; continue; }
+    tokens.push({ t: "punct", v: c, line }); i++;
+  }
+  return tokens.filter((t) => t.t !== "comment");
+}
+
+// ---------- analysis helpers ----------
+function matchClose(tokens, openIdx, open, close) {
+  let depth = 0;
+  for (let k = openIdx; k < tokens.length; k++) {
+    if (tokens[k].t === "punct" && tokens[k].v === open) depth++;
+    else if (tokens[k].t === "punct" && tokens[k].v === close) { depth--; if (depth === 0) return k; }
+  }
+  return -1;
+}
+const LITERAL = /^(true|false|null|undefined|NaN|\d+(\.\d+)?|".*"|'.*'|`.*`)$/;
+function rangeText(tokens, a, b) { let s = ""; for (let k = a; k < b; k++) s += tokens[k].v; return s; }
+
+function findCallback(tokens, openParen, closeParen) {
+  // locate '=>' or 'function' within the call args, then the body
+  for (let k = openParen + 1; k < closeParen; k++) {
+    const tk = tokens[k];
+    if (tk.t === "name" && tk.v === "function") {
+      let b = k + 1; while (b < closeParen && !(tokens[b].t === "punct" && tokens[b].v === "{")) b++;
+      if (b < closeParen) { const e = matchClose(tokens, b, "{", "}"); if (e !== -1) return { start: b + 1, end: e, braced: true }; }
+    }
+    if (tk.t === "punct" && tk.v === "=>") {
+      let b = k + 1;
+      if (tokens[b] && tokens[b].t === "punct" && tokens[b].v === "{") { const e = matchClose(tokens, b, "{", "}"); if (e !== -1) return { start: b + 1, end: e, braced: true }; }
+      return { start: b, end: closeParen, braced: false }; // concise expression body
+    }
+  }
+  return null;
+}
+
+function scanAssertions(tokens, start, end, cfg) {
+  // returns {assertions:[{kind}], banned:[{detail,line}]}
+  const roots = new Set(["expect", "assert", ...(cfg.assertion_roots || [])]);
+  const assertions = [];
+  for (let k = start; k < end; k++) {
+    const tk = tokens[k];
+    if (tk.t !== "name") continue;
+    // chai "should" style:  x.should.equal(...)
+    if (tk.v === "should" && tokens[k - 1] && tokens[k - 1].v === ".") { assertions.push({ kind: "real" }); continue; }
+    if (!roots.has(tk.v)) continue;
+    const nxt = tokens[k + 1];
+    // member-call assertion form: assert.strictEqual(...), assert.ok(...), should.equal(...)
+    if (nxt && nxt.v === "." && tokens[k + 2] && tokens[k + 2].t === "name" && tokens[k + 3] && tokens[k + 3].v === "(") {
+      const open = k + 3;
+      const close2 = matchClose(tokens, open, "(", ")");
+      const inner = close2 !== -1 ? rangeText(tokens, open + 1, close2).trim() : "";
+      assertions.push(classify(tk.v, inner, tokens[k + 2].v, null));
+      continue;
+    }
+    if (!nxt || !(nxt.t === "punct" && nxt.v === "(")) continue;
+    const close = matchClose(tokens, k + 1, "(", ")");
+    if (close === -1) continue;
+    const innerText = rangeText(tokens, k + 2, close).trim();
+    // matcher chain after the closing paren?
+    let matcher = null, matcherArg = null;
+    if (tokens[close + 1] && tokens[close + 1].v === "." && tokens[close + 2] && tokens[close + 2].t === "name") {
+      matcher = tokens[close + 2].v;
+      if (tokens[close + 3] && tokens[close + 3].v === "(") {
+        const mc = matchClose(tokens, close + 3, "(", ")");
+        if (mc !== -1) matcherArg = rangeText(tokens, close + 4, mc).trim();
+      }
+    }
+    assertions.push(classify(tk.v, innerText, matcher, matcherArg));
+  }
+  return assertions;
+}
+
+const SNAPSHOT = new Set(["toMatchSnapshot", "toMatchInlineSnapshot"]);
+const EQ_MATCHERS = new Set(["toBe", "toEqual", "toStrictEqual", "toBeCloseTo", "equal", "equals", "deepEqual", "strictEqual", "deepStrictEqual"]);
+const TRUTHY_MATCHERS = new Set(["toBeTruthy", "toBeFalsy", "toBeDefined", "toBeUndefined", "toBeNull"]);
+
+function classify(root, innerText, matcher, matcherArg) {
+  if (matcher && SNAPSHOT.has(matcher)) return { kind: "snapshot" };
+  const litInner = LITERAL.test(innerText);
+  if (root === "assert" && !matcher && litInner) return { kind: "trivial" };
+  if (matcher && EQ_MATCHERS.has(matcher) && matcherArg != null) {
+    const a = innerText.replace(/\s+/g, ""), b = matcherArg.replace(/\s+/g, "");
+    if (a === b && (LITERAL.test(innerText) || LITERAL.test(matcherArg))) return { kind: "trivial" };
+  }
+  if (matcher && TRUTHY_MATCHERS.has(matcher) && litInner) return { kind: "trivial" };
+  return { kind: "real" };
+}
+
+// Shared: turn a list of assertion {kind} into a test-quality finding (or null).
+function categorize(assertions, cfg, file, line, title) {
+  let category = null;
+  if (assertions.length === 0) category = "assertion-free";
+  else if (assertions.every((a) => a.kind === "snapshot")) category = "snapshot-only";
+  else if (assertions.every((a) => a.kind === "trivial" || a.kind === "snapshot")) category = "trivial";
+  if (category === "snapshot-only" && cfg.allow_snapshot_only) category = null;
+  if (!category) return null;
+  const failOn = new Set(cfg.fail_on || ["assertion-free", "trivial"]);
+  const sev = failOn.has(category) ? "high" : "med";
+  return finding(sev, file + ":" + line, "Test \"" + title + "\" is " + category + " — asserts no behavior/intent.");
+}
+
+// File-wide banned-mock scan (engine-independent).
+function bannedMockFindings(file, src, cfg) {
+  const out = [];
+  for (const pat of cfg.banned_mocks || []) {
+    let re;
+    try { re = new RegExp(pat); } catch (e) { continue; }
+    src.split("\n").forEach((ln, idx) => {
+      if (re.test(ln) && !ln.trim().startsWith("//")) out.push(finding("med", file + ":" + (idx + 1), "Banned mock/stub API matched /" + pat + "/: " + ln.trim().slice(0, 120)));
+    });
+  }
+  return out;
+}
+
+// ---------- AST engine (preferred) ----------
+function analyzeFileAST(file, src, cfg) {
+  const parser = loadParser();
+  if (!parser) throw new Error("no vendored parser");
+  const ast = parser.parse(src, {
+    ecmaVersion: "latest", sourceType: "module", locations: true,
+    allowReturnOutsideFunction: true, allowAwaitOutsideFunction: true,
+    allowImportExportEverywhere: true, allowHashBang: true,
+  });
+  const launchers = new Set(cfg.test_launchers || ["it", "test", "fit", "xit", "specify"]);
+  const roots = new Set(["expect", "assert", ...(cfg.assertion_roots || [])]);
+  const txt = (n) => src.slice(n.start, n.end);
+  const findings = [];
+
+  const launcherRoot = (c) => {
+    if (!c) return null;
+    if (c.type === "Identifier") return c.name;
+    if (c.type === "MemberExpression") return launcherRoot(c.object);
+    if (c.type === "CallExpression") return launcherRoot(c.callee); // test.each([...])(name, fn)
+    return null;
+  };
+  // Unwrap an expect(...).a.b chain back to the originating expect(...) call.
+  const expectCall = (obj) => {
+    let o = obj;
+    while (o && o.type === "MemberExpression") o = o.object;
+    if (o && o.type === "CallExpression" && o.callee.type === "Identifier" && roots.has(o.callee.name) && o.callee.name !== "assert") return o;
+    return null;
+  };
+
+  function bodyAssertions(body) {
+    const out = [];
+    walk(body, (n) => {
+      if (n.type === "MemberExpression" && !n.computed && n.property && n.property.name === "should") { out.push({ kind: "real" }); return; }
+      if (n.type !== "CallExpression") return;
+      const callee = n.callee;
+      if (callee.type === "MemberExpression") {
+        const ec = expectCall(callee.object);
+        if (ec) {
+          const matcher = callee.computed ? null : (callee.property && callee.property.name);
+          const inner = ec.arguments[0] ? txt(ec.arguments[0]) : "";
+          const marg = n.arguments[0] ? txt(n.arguments[0]) : null;
+          out.push(classify(ec.callee.name, inner, matcher, marg));
+          return;
+        }
+        if (callee.object.type === "Identifier" && roots.has(callee.object.name)) { // assert.strictEqual(a, b)
+          const method = callee.property && callee.property.name;
+          const a0 = n.arguments[0] ? txt(n.arguments[0]) : "";
+          const a1 = n.arguments[1] ? txt(n.arguments[1]) : null;
+          out.push(classify(callee.object.name, a0, method, a1));
+        }
+      } else if (callee.type === "Identifier" && roots.has(callee.name)) {
+        if (callee.name === "expect") return; // expect(x) with no matcher asserts nothing
+        out.push(classify(callee.name, n.arguments[0] ? txt(n.arguments[0]) : "", null, null));
+      }
+    });
+    return out;
+  }
+
+  walk(ast, (node) => {
+    if (node.type !== "CallExpression") return;
+    if (!launchers.has(launcherRoot(node.callee))) return;
+    let cb = null, title = "(unnamed)";
+    for (const a of node.arguments) {
+      if (a.type === "ArrowFunctionExpression" || a.type === "FunctionExpression") cb = a;
+      else if (title === "(unnamed)" && a.type === "Literal" && typeof a.value === "string") title = a.value;
+      else if (title === "(unnamed)" && a.type === "TemplateLiteral") title = txt(a).slice(1, -1);
+    }
+    if (!cb) return;
+    const f = categorize(bodyAssertions(cb.body), cfg, file, node.loc.start.line, title);
+    if (f) findings.push(f);
+  });
+  return findings;
+}
+
+// ---------- token engine (fallback) ----------
+function analyzeFileTokens(file, src, cfg) {
+  const tokens = tokenize(src);
+  const launchers = new Set(cfg.test_launchers || ["it", "test", "fit", "xit", "specify"]);
+  const findings = [];
+  for (let k = 0; k < tokens.length; k++) {
+    const tk = tokens[k];
+    if (tk.t !== "name" || !launchers.has(tk.v)) continue;
+    let j = k + 1;
+    while (tokens[j] && tokens[j].v === "." && tokens[j + 1] && tokens[j + 1].t === "name") j += 2;
+    if (!tokens[j] || tokens[j].v !== "(") continue;
+    const close = matchClose(tokens, j, "(", ")");
+    if (close === -1) continue;
+    let title = "(unnamed)";
+    for (let m = j + 1; m < close; m++) { if (tokens[m].t === "string" || tokens[m].t === "template") { title = tokens[m].v.slice(1, -1); break; } if (tokens[m].v === ",") break; }
+    const cb = findCallback(tokens, j, close);
+    if (!cb) { k = close; continue; }
+    const f = categorize(scanAssertions(tokens, cb.start, cb.end, cfg), cfg, file, tk.line, title);
+    if (f) findings.push(f);
+    k = close;
+  }
+  return findings;
+}
+
+// AST-first, token-fallback. Returns {findings, engine}.
+function analyzeFile(file, cfg) {
+  const src = fs.readFileSync(file, "utf8");
+  const findings = bannedMockFindings(file, src, cfg);
+  let testFindings = null, engine = "tokens";
+  if (loadParser()) {
+    try { testFindings = analyzeFileAST(file, src, cfg); engine = "ast"; }
+    catch (e) { testFindings = null; engine = "tokens(fallback)"; }
+  }
+  if (testFindings === null) testFindings = analyzeFileTokens(file, src, cfg);
+  return { findings: findings.concat(testFindings), engine };
+}
+
+function main() {
+  const args = parseArgs(process.argv.slice(2));
+  const policy = (args.policy && loadJson(args.policy)) || {};
+  const cfg = ((policy.gates || {})["intent-gate"]) || {};
+  const root = args.context || ".";
+
+  let files = expandChanged(args.changed, root)
+    .filter((p) => TS_EXT.has(path.extname(p)))
+    .filter((p) => /\.(test|spec)\.|(^|\/)(__tests__|tests?|spec)\//i.test(p) || /(test|spec)/i.test(path.basename(p)));
+
+  files = [...new Set(files)];
+  if (files.length === 0) emit("skip", "no JS/TS test files among changed paths", [], 0);
+
+  let findings = [];
+  const engines = {};
+  for (const f of files) {
+    const r = analyzeFile(f, cfg);
+    findings = findings.concat(r.findings);
+    engines[r.engine] = (engines[r.engine] || 0) + 1;
+  }
+  const eng = " [engine " + Object.entries(engines).map(([k, v]) => k + ":" + v).join(", ") + "]";
+
+  const high = findings.filter((f) => f.severity === "high");
+  if (high.length) emit("fail", high.length + " test(s) assert no intent (of " + findings.length + " issue(s))" + eng, findings, 0.95);
+  if (findings.length) emit("escalate", findings.length + " test-quality concern(s) below fail threshold" + eng, findings, 0.7);
+  emit("pass", files.length + " test file(s): all tests assert intent" + eng, [], 0.9);
+}
+
+try { main(); } catch (e) { failInternal(e && e.stack ? e.stack.split("\n")[0] : String(e)); }

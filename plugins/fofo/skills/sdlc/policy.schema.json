@@ -1,0 +1,86 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://fofo-agentic-sdlc/policy.schema.json",
+  "title": "FoFo Agentic SDLC policy",
+  "description": "Per-gate behavior (thresholds, banned patterns, file conventions). Orchestration lives in gates.config, not here.",
+  "type": "object",
+  "properties": {
+    "_comment": { "type": "string" },
+    "gates": {
+      "type": "object",
+      "description": "Keyed by gate name. Each gate reads its own options from gates.<name>.",
+      "properties": {
+        "spec-lint": {
+          "type": "object",
+          "properties": {
+            "spec_file": { "type": "string", "default": "REQUIREMENTS.md" },
+            "id_pattern": { "type": "string", "description": "Regex matching a requirement ID.", "default": "REQ-\\d+" },
+            "acceptance_label": { "type": "string", "default": "Acceptance" }
+          },
+          "additionalProperties": false
+        },
+        "trace-gate": {
+          "type": "object",
+          "properties": {
+            "spec_file": { "type": "string", "default": "REQUIREMENTS.md" },
+            "id_pattern": { "type": "string", "default": "REQ-\\d+" },
+            "test_reqs": { "type": "string", "default": "TEST-REQS.yaml" },
+            "test_glob": {
+              "oneOf": [{ "type": "string" }, { "type": "array", "items": { "type": "string" } }],
+              "description": "Globs locating test files when none are in --changed."
+            }
+          },
+          "additionalProperties": false
+        },
+        "redgreen-gate": {
+          "type": "object",
+          "properties": {
+            "test_command": { "type": ["string", "null"], "description": "Shell command that runs the suite." },
+            "red_for_reason": { "type": "array", "items": { "type": "string" }, "description": "Regexes that mark a 'wrong' red (load/collection error)." },
+            "timeout_seconds": { "type": "integer", "minimum": 1, "default": 600 }
+          },
+          "additionalProperties": false
+        },
+        "intent-gate": {
+          "type": "object",
+          "properties": {
+            "test_launchers": { "type": "array", "items": { "type": "string" } },
+            "assertion_roots": { "type": "array", "items": { "type": "string" } },
+            "banned_mocks": { "type": "array", "items": { "type": "string" }, "description": "Regexes forbidden inside test bodies." },
+            "allow_snapshot_only": { "type": "boolean", "default": false },
+            "fail_on": {
+              "type": "array",
+              "items": { "enum": ["assertion-free", "trivial", "snapshot-only"] },
+              "description": "Categories that are hard fails; others escalate."
+            }
+          },
+          "additionalProperties": false
+        },
+        "separation-gate": {
+          "type": "object",
+          "properties": {
+            "manifest": { "type": ["string", "null"], "description": "Path to PROVENANCE.yaml/.json." }
+          },
+          "additionalProperties": false
+        },
+        "semantic-test-judge": {
+          "type": "object",
+          "properties": {
+            "spec_file": { "type": "string", "default": "REQUIREMENTS.md" },
+            "escalate_below": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.6 }
+          },
+          "additionalProperties": false
+        },
+        "fresh-eyes-review": {
+          "type": "object",
+          "properties": {
+            "spec_file": { "type": "string", "default": "REQUIREMENTS.md" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+"""
+separation-gate — Phase 4 enforcement of Author != Judge.
+
+Reads a provenance manifest and fails if the same context authored BOTH the
+tests and the code for a unit. This is the enforcement upgrade to procedural
+separation (sub-agents): when it's on, the rule is checked, not trusted.
+
+Manifest (PROVENANCE.yaml or PROVENANCE.json at the context root). YAML form is a
+deliberately tiny subset — a list of mappings with scalar values:
+
+    units:
+      - unit: validator
+        tests_by: judge-ctx-7am
+        code_by: author-ctx-9am
+      - unit: parser
+        tests_by: judge-ctx-7am
+        code_by: judge-ctx-7am        # <-- same context wrote both: FAIL
+
+JSON form: {"units": [{"unit": "...", "tests_by": "...", "code_by": "..."}]}
+
+Contract: see references/gate-contract.md
+Config keys (policy.gates.separation-gate):
+  manifest   path to provenance manifest (default: PROVENANCE.yaml then PROVENANCE.json)
+"""
+import json
+import os
+import re
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import gatelib  # noqa: E402
+
+GATE, TIER = "separation-gate", 0
+
+
+def parse_units(text):
+    """Parse the documented manifest (JSON, or the tiny YAML subset)."""
+    stripped = text.strip()
+    if not stripped:
+        return []
+    if stripped[0] in "{[":
+        data = json.loads(stripped)
+        return data.get("units", data) if isinstance(data, dict) else data
+
+    units, cur = [], None
+    for raw in text.splitlines():
+        line = raw.split("#", 1)[0].rstrip()
+        if not line.strip() or line.strip() == "units:":
+            continue
+        m = re.match(r"\s*-\s*(\w[\w-]*)\s*:\s*(.+)$", line)
+        if m:
+            if cur:
+                units.append(cur)
+            cur = {m.group(1): m.group(2).strip().strip('"\'')}
+            continue
+        m = re.match(r"\s+(\w[\w-]*)\s*:\s*(.+)$", line)
+        if m and cur is not None:
+            cur[m.group(1)] = m.group(2).strip().strip('"\'')
+    if cur:
+        units.append(cur)
+    return units
+
+
+def main():
+    _p, args = gatelib.parse_args()
+    policy = gatelib.load_policy(args)
+    opts = gatelib.gate_options(policy, GATE)
+    root = args.context or "."
+
+    manifest = opts.get("manifest")
+    candidates = [manifest] if manifest else ["PROVENANCE.yaml", "PROVENANCE.yml", "PROVENANCE.json"]
+    path = None
+    for c in candidates:
+        if not c:
+            continue
+        full = c if os.path.isabs(c) else os.path.join(root, c)
+        if os.path.isfile(full):
+            path = full
+            break
+    if not path:
+        gatelib.emit(GATE, TIER, "skip",
+                     "no provenance manifest found — separation is procedural only (not enforced)")
+
+    try:
+        units = parse_units(gatelib.read_text(path))
+    except Exception as exc:  # noqa: BLE001
+        gatelib.emit(GATE, TIER, "fail", "could not parse provenance manifest: %s" % exc,
+                     [gatelib.finding("high", os.path.basename(path), str(exc))])
+        return
+
+    if not units:
+        gatelib.emit(GATE, TIER, "skip", "provenance manifest has no units")
+
+    findings = []
+    for u in units:
+        name = u.get("unit", "?")
+        t, c = u.get("tests_by"), u.get("code_by")
+        if not t or not c:
+            findings.append(gatelib.finding("med", name, "Unit '%s' missing tests_by/code_by; cannot verify separation." % name))
+        elif t == c:
+            findings.append(gatelib.finding("high", name, "Same context '%s' authored both tests and code for unit '%s'." % (t, name)))
+
+    high = [f for f in findings if f["severity"] == "high"]
+    if high:
+        gatelib.emit(GATE, TIER, "fail", "%d unit(s) violate Author!=Judge separation" % len(high),
+                     findings, confidence=1.0)
+    if findings:
+        gatelib.emit(GATE, TIER, "escalate", "separation incomplete for %d unit(s)" % len(findings),
+                     findings, confidence=0.7)
+    gatelib.emit(GATE, TIER, "pass", "%d unit(s): tests and code authored by separate contexts" % len(units),
+                 confidence=1.0)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as exc:  # noqa: BLE001
+        gatelib.fail_internal(GATE, TIER, exc)

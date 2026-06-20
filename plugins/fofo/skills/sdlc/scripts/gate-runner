@@ -1,0 +1,218 @@
+#!/usr/bin/env python3
+"""
+gate-runner — the conductor (Referee).
+
+Reads gates.config, runs enabled gates fail-fast in tier order (cheap -> expensive),
+aggregates every JSON verdict into one report with one overall exit code, and emits
+an escalation payload for anything that escalated or hit a waivable fail.
+
+Usage:
+    gate-runner --config gates.config --changed "src/**/*.ts" [--policy policy.json] [--context .]
+    gate-runner --changed "..."            # defaults to ./gates.config and its policy
+
+Each gate entry in gates.config:
+    {"name": "...", "tier": 0, "enabled": true,
+     "script": "trace-gate",          # a kept gate in scripts/, OR
+     "command": "eslint src/",        # a bring-your-own command (string or list), OR
+     "command": ["adapter","--name","lint","--tier","0","--","eslint","src/"],
+     "args": ["--expect","green"],    # optional extra args appended
+     "waivable": false}               # a fail escalates instead of stopping the run
+
+Overall exit: >=10 if any gate errored · 1 if any hard fail · 2 if any escalation · 0 otherwise.
+
+Loop-back routing (Referee -> who fixes it): findings are tagged route="code" or
+route="tests" so the host sends code problems back to the Author and test problems
+back to the Judge — the Author never edits the tests that grade it.
+"""
+import json
+import os
+import shlex
+import subprocess
+import sys
+
+SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, SCRIPTS_DIR)
+import gatelib  # noqa: E402
+
+# Which role fixes a failure from each gate.
+ROUTE = {
+    "spec-lint": "spec", "trace-gate": "tests", "intent-gate": "tests",
+    "semantic-test-judge": "tests", "separation-gate": "tests",
+    "redgreen-gate": "code", "mutation": "code", "coverage": "tests",
+    "lint": "code", "fresh-eyes-review": "code",
+}
+
+
+def find_script(name):
+    path = os.path.join(SCRIPTS_DIR, name)
+    return path if os.path.isfile(path) else None
+
+
+def launch_argv(script_path):
+    """Build an argv that runs a script regardless of the +x bit, via its shebang."""
+    try:
+        with open(script_path, "r", encoding="utf-8", errors="replace") as fh:
+            first = fh.readline()
+    except OSError:
+        first = ""
+    if first.startswith("#!"):
+        interp = first[2:].strip()
+        parts = interp.split()
+        # "/usr/bin/env python3" -> ["python3"] via env, keep as-is otherwise
+        return parts + [script_path]
+    if os.access(script_path, os.X_OK):
+        return [script_path]
+    return [sys.executable, script_path]
+
+
+def run_gate(entry, common):
+    name = entry.get("name", "?")
+    tier = entry.get("tier", 0)
+    extra = entry.get("args", []) or []
+
+    if entry.get("script"):
+        sp = find_script(entry["script"])
+        if not sp:
+            return {"gate": name, "tier": tier, "status": "skip",
+                    "summary": "script not found: %s" % entry["script"],
+                    "findings": [], "confidence": 0.0, "exit": 3}
+        argv = launch_argv(sp) + common + list(extra)
+        shell = False
+    elif entry.get("command"):
+        cmd = entry["command"]
+        if isinstance(cmd, str):
+            argv, shell = cmd, True
+        else:
+            argv, shell = list(cmd) + common + list(extra), False
+    else:
+        return {"gate": name, "tier": tier, "status": "skip",
+                "summary": "no script or command configured", "findings": [], "confidence": 0.0, "exit": 3}
+
+    try:
+        proc = subprocess.run(argv, shell=shell, capture_output=True, text=True)
+    except Exception as exc:  # noqa: BLE001
+        return {"gate": name, "tier": tier, "status": "error",
+                "summary": "failed to launch gate: %s" % exc, "findings": [], "confidence": 0.0, "exit": 10}
+
+    verdict = parse_verdict(proc.stdout, name, tier)
+    verdict["exit"] = proc.returncode
+    # Exit code is authoritative; reconcile status if they disagree.
+    code_status = {0: "pass", 1: "fail", 2: "escalate", 3: "skip"}.get(proc.returncode)
+    if proc.returncode >= 10:
+        verdict["status"] = "error"
+    elif code_status and verdict.get("status") != code_status:
+        verdict["_status_mismatch"] = "json=%s exit=%d" % (verdict.get("status"), proc.returncode)
+        verdict["status"] = code_status
+    if proc.returncode >= 10 and not verdict.get("summary"):
+        verdict["summary"] = (proc.stderr or "gate internal error").strip().splitlines()[-1:] or ["gate internal error"]
+    return verdict
+
+
+def parse_verdict(stdout, name, tier):
+    for line in reversed((stdout or "").strip().splitlines()):
+        line = line.strip()
+        if line.startswith("{") and line.endswith("}"):
+            try:
+                return json.loads(line)
+            except json.JSONDecodeError:
+                continue
+    return {"gate": name, "tier": tier, "status": "error",
+            "summary": "gate produced no valid JSON verdict", "findings": [], "confidence": 0.0}
+
+
+def main():
+    _p, args = gatelib.parse_args()
+    config = gatelib.load_config(args)
+    if not config:
+        gatelib.fail_internal("gate-runner", 0, "no gates.config found (pass --config or add ./gates.config)")
+
+    # Resolve policy path: --policy > config.policy > ./policy.json
+    policy_path = args.policy or config.get("policy")
+    if policy_path and not os.path.isabs(policy_path):
+        policy_path = os.path.join(args.context or ".", policy_path)
+    config_path = args.config or os.path.join(args.context or ".", "gates.config")
+
+    changed = gatelib.split_patterns(args.changed)
+    common = []
+    for c in changed:
+        common += ["--changed", c]
+    if policy_path:
+        common += ["--policy", policy_path]
+    common += ["--context", args.context or "."]
+    if os.path.isfile(config_path):
+        common += ["--config", config_path]
+
+    gates = [g for g in config.get("gates", []) if g.get("enabled")]
+    gates.sort(key=lambda g: g.get("tier", 0))
+    fail_fast = config.get("fail_fast", True)
+
+    verdicts, escalations, stopped = [], [], None
+    for entry in gates:
+        v = run_gate(entry, common)
+        route = ROUTE.get(v.get("gate", entry.get("name")), "review")
+        v["route"] = route
+        verdicts.append(v)
+        status, code = v.get("status"), v.get("exit", 0)
+
+        sys.stderr.write("[%s] tier %s -> %s : %s\n" % (
+            v.get("gate"), v.get("tier"), status, v.get("summary", "")))
+
+        if code >= 10 or status == "error":
+            stopped = "error"
+            break
+        if status == "escalate":
+            escalations.append(escalation_item(v))
+        elif status == "fail":
+            if entry.get("waivable"):
+                escalations.append(escalation_item(v, waived=True))
+            else:
+                escalations.append(escalation_item(v))
+                if fail_fast:
+                    stopped = "fail"
+                    break
+
+    has_error = any(v.get("status") == "error" or v.get("exit", 0) >= 10 for v in verdicts)
+    has_fail = any(v.get("status") == "fail" for v in verdicts)
+    has_esc = any(v.get("status") == "escalate" for v in verdicts)
+    if has_error:
+        overall, exit_code = "error", 10
+    elif has_fail:
+        overall, exit_code = "fail", 1
+    elif has_esc:
+        overall, exit_code = "escalate", 2
+    else:
+        overall, exit_code = "pass", 0
+
+    report = {
+        "overall_status": overall,
+        "overall_exit": exit_code,
+        "stopped_early": stopped,
+        "ran": len(verdicts),
+        "gates": verdicts,
+        "escalation": escalations,
+    }
+    sys.stdout.write(json.dumps(report, indent=2) + "\n")
+    sys.stderr.write("\nOVERALL: %s (exit %d) — %d gate(s) ran, %d escalation(s)\n" % (
+        overall, exit_code, len(verdicts), len(escalations)))
+    sys.exit(exit_code)
+
+
+def escalation_item(v, waived=False):
+    high = [f for f in v.get("findings", []) if f.get("severity") in ("high", "med")]
+    return {
+        "gate": v.get("gate"),
+        "tier": v.get("tier"),
+        "status": v.get("status"),
+        "route": v.get("route"),
+        "waived": waived,
+        "summary": v.get("summary"),
+        "confidence": v.get("confidence", 0.0),
+        "findings": high or v.get("findings", []),
+    }
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as exc:  # noqa: BLE001
+        gatelib.fail_internal("gate-runner", 0, exc)

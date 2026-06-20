@@ -1,0 +1,4 @@
+units:
+  - unit: slugify
+    tests_by: solo-ctx-2026-06-20
+    code_by: solo-ctx-2026-06-20

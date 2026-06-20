@@ -1,0 +1,105 @@
+#!/usr/bin/env python3
+"""
+fresh-eyes-review — Tier 1, model-based (third context).
+
+Sends the combined diff of the changed files to the configured model endpoint for
+a hack / cheat / security / silent-architecture-change scan — the things a tired
+author and green tests both miss:
+  - tests or code weakened to pass (assertions deleted, thresholds lowered)
+  - security issues (injection, secrets, unsafe deserialization, authz gaps)
+  - silent architectural changes not called for by the spec
+
+Returns a contract verdict:
+  - any high-severity finding -> escalate (human decides)
+  - medium findings -> escalate with lower confidence
+  - clean -> pass
+
+Skips cleanly (exit 3) if no model endpoint/key is configured. Network access is
+limited to the configured endpoint (see modellib.py).
+
+Contract: see references/gate-contract.md
+Config keys (policy.gates.fresh-eyes-review):
+  spec_file   requirements doc for "was this asked for?" (default "REQUIREMENTS.md")
+"""
+import os
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+import gatelib  # noqa: E402
+import modellib  # noqa: E402
+
+GATE, TIER = "fresh-eyes-review", 1
+
+SYSTEM = (
+    "You are a skeptical senior reviewer seeing this change with fresh eyes. Hunt for "
+    "cheating (tests/code weakened to pass), security flaws, and architecture changes "
+    "the spec did not ask for. Be specific. Reply ONLY with JSON."
+)
+
+PROMPT = """Spec (what was actually asked for):
+---
+{spec}
+---
+
+Combined changed files:
+---
+{diff}
+---
+
+Find real problems only. Reply with ONLY this JSON:
+{{
+  "findings": [
+    {{"severity": "low|med|high", "location": "file:line-ish", "detail": "<specific>"}}
+  ],
+  "confidence": 0.0-1.0,
+  "summary": "<one line>"
+}}"""
+
+
+def main():
+    _p, args = gatelib.parse_args()
+    policy = gatelib.load_policy(args)
+    config = gatelib.load_config(args)
+    opts = gatelib.gate_options(policy, GATE)
+    root = args.context or "."
+
+    try:
+        resolved = modellib.resolve(config)
+    except modellib.NotConfigured as exc:
+        gatelib.emit(GATE, TIER, "skip", "model endpoint not configured: %s" % exc)
+
+    spec_file = opts.get("spec_file", "REQUIREMENTS.md")
+    spec_path = spec_file if os.path.isabs(spec_file) else os.path.join(root, spec_file)
+    spec = gatelib.read_text(spec_path) if os.path.isfile(spec_path) else "(no spec file found)"
+
+    files = gatelib.expand_changed(args.changed, root)
+    if not files:
+        gatelib.emit(GATE, TIER, "skip", "no changed files to review")
+    blob = "\n\n".join("// FILE: %s\n%s" % (f, gatelib.read_text(f)[:6000]) for f in files[:40])
+
+    try:
+        reply = modellib.complete(resolved, SYSTEM, PROMPT.format(spec=spec[:8000], diff=blob))
+        data = modellib.extract_json(reply)
+    except Exception as exc:  # noqa: BLE001
+        gatelib.emit(GATE, TIER, "escalate", "fresh-eyes review failed to return usable JSON: %s" % exc,
+                     [gatelib.finding("low", "fresh-eyes-review", str(exc))], confidence=0.0)
+        return
+
+    raw = data.get("findings", []) or []
+    findings = [gatelib.finding(f.get("severity", "med"), f.get("location", "?"), f.get("detail", "")) for f in raw]
+    overall = float(data.get("confidence", 0.0))
+    summary = data.get("summary", "%d finding(s)" % len(findings))
+
+    if any(f["severity"] == "high" for f in findings):
+        gatelib.emit(GATE, TIER, "escalate", "high-severity concern: " + summary, findings, confidence=overall)
+    if findings:
+        gatelib.emit(GATE, TIER, "escalate", summary, findings, confidence=overall)
+    gatelib.emit(GATE, TIER, "pass", summary or "no concerns", confidence=overall)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as exc:  # noqa: BLE001
+        gatelib.fail_internal(GATE, TIER, exc)

@@ -1,0 +1,11 @@
+{
+  "gates": {
+    "spec-lint": { "spec_file": "REQUIREMENTS.md", "id_pattern": "REQ-\\d+", "acceptance_label": "Acceptance" },
+    "trace-gate": { "spec_file": "REQUIREMENTS.md", "id_pattern": "REQ-\\d+", "test_reqs": "TEST-REQS.yaml" },
+    "redgreen-gate": { "test_command": "node --test test/*.test.js", "timeout_seconds": 120 },
+    "intent-gate": { "banned_mocks": ["sinon\\.stub"], "fail_on": ["assertion-free", "trivial"] },
+    "separation-gate": { "manifest": "PROVENANCE.yaml" },
+    "semantic-test-judge": { "spec_file": "REQUIREMENTS.md", "escalate_below": 0.6 },
+    "fresh-eyes-review": { "spec_file": "REQUIREMENTS.md" }
+  }
+}

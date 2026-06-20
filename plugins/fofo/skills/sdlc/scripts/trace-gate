@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+"""
+trace-gate — Phase 1 + Phase 4 exit gate (language-agnostic).
+
+Checks traceability both directions:
+  - every requirement ID is covered, AND
+  - no test references a requirement ID that doesn't exist (orphan tests).
+
+Coverage is satisfied by either source, whichever exists:
+  - an intent in TEST-REQS.yaml  (Phase 1: requirements -> test intents), and/or
+  - a requirement-ID tag in a test file (Phase 4: requirements -> real tests).
+
+Tag convention (language-agnostic): the requirement ID literally appears in a
+test file — in the test name, a tag like `@req:REQ-001`, or a metadata comment.
+Default match is the requirement ID itself, so `it("REQ-001 rejects empty")` or
+`# req: REQ-001` both count.
+
+Contract: see references/gate-contract.md
+Config keys (policy.gates.trace-gate):
+  spec_file     requirements doc                 (default "REQUIREMENTS.md")
+  id_pattern    regex for requirement IDs        (default "REQ-\\d+")
+  test_reqs     intents file                     (default "TEST-REQS.yaml")
+  test_glob     globs for test files             (default sensible test globs)
+"""
+import os
+import re
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import gatelib  # noqa: E402
+
+GATE, TIER = "trace-gate", 0
+DEFAULT_TEST_GLOBS = [
+    "**/*test*.*", "**/*spec*.*", "**/test_*.*", "**/*_test.*",
+    "test/**/*", "tests/**/*", "spec/**/*", "__tests__/**/*",
+]
+
+
+def collect_requirement_ids(path, id_re):
+    ids = []
+    for line in gatelib.read_text(path).splitlines():
+        m = id_re.search(line)
+        if m and (line.lstrip().startswith(("#", "-", "*", ">")) or re.search(re.escape(m.group(0)) + r"\s*[:.)\-]", line)):
+            if m.group(0) not in ids:
+                ids.append(m.group(0))
+    return ids
+
+
+def ids_in_text(text, id_re):
+    return set(id_re.findall(text))
+
+
+def main():
+    _p, args = gatelib.parse_args()
+    policy = gatelib.load_policy(args)
+    opts = gatelib.gate_options(policy, GATE)
+    root = args.context or "."
+
+    id_re = re.compile(opts.get("id_pattern", r"REQ-\d+"))
+    spec_file = opts.get("spec_file", "REQUIREMENTS.md")
+    spec_path = spec_file if os.path.isabs(spec_file) else os.path.join(root, spec_file)
+    if not os.path.isfile(spec_path):
+        gatelib.emit(GATE, TIER, "skip", "no spec file (%s) to trace from" % spec_file)
+
+    req_ids = collect_requirement_ids(spec_path, id_re)
+    if not req_ids:
+        gatelib.emit(GATE, TIER, "skip", "no requirement IDs found in %s" % spec_file)
+
+    # --- intents (Phase 1) ---
+    intents_file = opts.get("test_reqs", "TEST-REQS.yaml")
+    intents_path = intents_file if os.path.isabs(intents_file) else os.path.join(root, intents_file)
+    intent_ids = ids_in_text(gatelib.read_text(intents_path), id_re) if os.path.isfile(intents_path) else set()
+
+    # --- tests (Phase 4) ---
+    changed = gatelib.expand_changed(args.changed, root)
+    test_globs = opts.get("test_glob", DEFAULT_TEST_GLOBS)
+    if isinstance(test_globs, str):
+        test_globs = [test_globs]
+    test_files = set(f for f in changed if re.search(r"(test|spec|__tests__)", f, re.IGNORECASE))
+    if not test_files:
+        test_files = set(gatelib.expand_changed(test_globs, root))
+
+    tagged_ids = set()
+    orphan_findings = []
+    valid = set(req_ids)
+    for tf in sorted(test_files):
+        found = ids_in_text(gatelib.read_text(tf), id_re)
+        tagged_ids |= (found & valid)
+        for bad in sorted(found - valid):
+            orphan_findings.append(gatelib.finding(
+                "med", tf, "Test references unknown requirement '%s' (not in %s)." % (bad, spec_file)))
+
+    covered = intent_ids | tagged_ids
+    uncovered = [r for r in req_ids if r not in covered]
+
+    findings = list(orphan_findings)
+    for r in uncovered:
+        findings.append(gatelib.finding(
+            "high", spec_file, "Requirement '%s' has no test intent and no tagged test." % r))
+
+    if uncovered:
+        gatelib.emit(GATE, TIER, "fail",
+                     "%d/%d requirement(s) untraced" % (len(uncovered), len(req_ids)),
+                     findings, confidence=1.0)
+    if orphan_findings:
+        gatelib.emit(GATE, TIER, "escalate",
+                     "all requirements traced; %d orphan test reference(s)" % len(orphan_findings),
+                     findings, confidence=0.8)
+    gatelib.emit(GATE, TIER, "pass",
+                 "%d/%d requirements traced (intents=%d, tagged=%d)" % (
+                     len(req_ids), len(req_ids), len(intent_ids & valid), len(tagged_ids)),
+                 confidence=1.0)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as exc:  # noqa: BLE001
+        gatelib.fail_internal(GATE, TIER, exc)

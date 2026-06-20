@@ -1,0 +1,120 @@
+#!/usr/bin/env python3
+"""
+semantic-test-judge — Tier 1, model-based.
+
+Sends the spec + the changed tests to the configured model endpoint and asks
+whether each test asserts the *intent* of its requirement, versus merely touching
+lines (running code without checking the outcome that the requirement cares about).
+
+Returns a contract verdict:
+  - any test judged "does not assert intent" with high confidence -> fail
+  - low overall confidence, or borderline tests -> escalate
+  - otherwise pass
+
+Skips cleanly (exit 3) if no model endpoint/key is configured — it is OFF by
+default. Network access is limited to the configured endpoint (see modellib.py).
+
+Contract: see references/gate-contract.md
+Config: gates.config.model.{endpoint|base_url, model, api_key_env}
+Config keys (policy.gates.semantic-test-judge):
+  spec_file            requirements doc        (default "REQUIREMENTS.md")
+  escalate_below       confidence floor        (default 0.6)
+"""
+import os
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+import gatelib  # noqa: E402
+import modellib  # noqa: E402
+
+GATE, TIER = "semantic-test-judge", 1
+
+SYSTEM = (
+    "You are a strict test reviewer. You judge whether automated tests assert the "
+    "INTENT of a requirement (the observable behavior it promises) rather than just "
+    "executing code. Reply ONLY with JSON."
+)
+
+PROMPT = """Requirements (spec):
+---
+{spec}
+---
+
+Changed test files:
+---
+{tests}
+---
+
+For each distinct test you can identify, decide if it asserts the INTENT of a
+requirement (checks the behavior/outcome the spec promises) or merely touches
+lines (calls code without asserting the meaningful result).
+
+Reply with ONLY this JSON object:
+{{
+  "tests": [
+    {{"name": "<test name>", "asserts_intent": true|false, "confidence": 0.0-1.0, "reason": "<short>"}}
+  ],
+  "overall_confidence": 0.0-1.0,
+  "summary": "<one line>"
+}}"""
+
+
+def main():
+    _p, args = gatelib.parse_args()
+    policy = gatelib.load_policy(args)
+    config = gatelib.load_config(args)
+    opts = gatelib.gate_options(policy, GATE)
+    root = args.context or "."
+
+    try:
+        resolved = modellib.resolve(config)
+    except modellib.NotConfigured as exc:
+        gatelib.emit(GATE, TIER, "skip", "model endpoint not configured: %s" % exc)
+
+    spec_file = opts.get("spec_file", "REQUIREMENTS.md")
+    spec_path = spec_file if os.path.isabs(spec_file) else os.path.join(root, spec_file)
+    spec = gatelib.read_text(spec_path) if os.path.isfile(spec_path) else "(no spec file found)"
+
+    files = [f for f in gatelib.expand_changed(args.changed, root)
+             if any(k in f.lower() for k in ("test", "spec", "__tests__"))]
+    if not files:
+        gatelib.emit(GATE, TIER, "skip", "no changed test files to judge")
+    tests_blob = "\n\n".join("// FILE: %s\n%s" % (f, gatelib.read_text(f)[:8000]) for f in files[:25])
+
+    escalate_below = float(opts.get("escalate_below", 0.6))
+    try:
+        reply = modellib.complete(resolved, SYSTEM, PROMPT.format(spec=spec[:12000], tests=tests_blob))
+        data = modellib.extract_json(reply)
+    except Exception as exc:  # noqa: BLE001
+        gatelib.emit(GATE, TIER, "escalate", "model judge failed to return usable JSON: %s" % exc,
+                     [gatelib.finding("low", "semantic-test-judge", str(exc))], confidence=0.0)
+        return
+
+    judged = data.get("tests", []) or []
+    findings = []
+    weak = []
+    for t in judged:
+        if not t.get("asserts_intent", True):
+            sev = "high" if float(t.get("confidence", 0)) >= 0.7 else "med"
+            weak.append(t)
+            findings.append(gatelib.finding(sev, t.get("name", "?"),
+                            "Does not assert requirement intent: %s (conf %.2f)" % (t.get("reason", ""), float(t.get("confidence", 0)))))
+    overall = float(data.get("overall_confidence", 0.0))
+    summary = data.get("summary", "%d/%d tests assert intent" % (len(judged) - len(weak), len(judged)))
+
+    high = [f for f in findings if f["severity"] == "high"]
+    if high:
+        gatelib.emit(GATE, TIER, "fail", summary, findings, confidence=overall)
+    if findings or overall < escalate_below:
+        gatelib.emit(GATE, TIER, "escalate",
+                     summary + (" (low confidence %.2f)" % overall if overall < escalate_below else ""),
+                     findings, confidence=overall)
+    gatelib.emit(GATE, TIER, "pass", summary, confidence=overall)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as exc:  # noqa: BLE001
+        gatelib.fail_internal(GATE, TIER, exc)
