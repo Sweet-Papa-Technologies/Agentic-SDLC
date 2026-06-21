@@ -95,8 +95,10 @@ changed files:
   --changed "src/**/* test/**/*" --context .
 ```
 This runs the enabled Tier-0 hard gates (`trace-gate`, `intent-gate`,
-`redgreen-gate`, and — if enabled — `mutation`, `coverage`, `separation-gate`)
-fail-fast in tier order and prints one aggregate JSON verdict.
+`redgreen-gate`, and — if enabled — `mutation`, `coverage`, `separation-gate`,
+`flake-gate`, `diff-budget`) fail-fast in tier order and prints one aggregate JSON
+verdict. (`flake-gate` belongs here once the suite is green — it judges whether the
+green is *stable*, not whether it's green.)
 Exit: all hard gates pass, or escalate.
 
 **Phase 5 — Fresh-Eyes Review (Referee, Tier 1, third context).** With the model
@@ -172,7 +174,8 @@ Every gate — kept or bring-your-own — obeys one I/O contract: invoked with
 [references/gate-contract.md](references/gate-contract.md).
 
 - **Kept, language-agnostic:** `spec-lint`, `trace-gate`, `redgreen-gate`,
-  `separation-gate`.
+  `separation-gate`, `flake-gate` (re-runs the suite to catch non-determinism),
+  `diff-budget` (caps changed lines so the PR stays reviewable).
 - **Kept JS/TS reference:** `intent-gate` — real-AST analysis of test quality via a
   parser **vendored with the skill** (nothing to install), with an automatic
   token-based fallback for TS/JSX. Other languages drop in their own analyzer behind

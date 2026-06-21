@@ -3,6 +3,28 @@
 All notable changes to the `fofo` plugin are documented here. This project adheres
 to [Semantic Versioning](https://semver.org).
 
+## [Unreleased]
+
+### Added
+- **`secret-scan`** gate (Tier 0, language-agnostic, key-free) — deterministically
+  flags hard-coded secrets: AWS access key IDs and PEM private-key headers hard-fail,
+  secret-looking assignments escalate. Allowlist + custom patterns via
+  `policy.gates.secret-scan`. Dogfooded through the loop itself (see
+  `examples/security-gates`).
+- **`flake-gate`** gate (Tier 0, language-agnostic, opt-in) — re-runs the suite N
+  times and fails on a non-deterministic result. A flaky test is an untrustworthy
+  test; run it after green to judge whether the green is *stable*. Reuses
+  `redgreen-gate.test_command` unless overridden.
+- **`diff-budget`** gate (Tier 0, language-agnostic, opt-in) — caps changed lines so
+  a PR stays reviewable (Phase 7). Auto-selects git-numstat mode in a work tree and
+  falls back to line-counting the `--changed` files; over budget escalates (waivable).
+  Promotes the former bring-your-own snippet to a kept gate.
+- **`selftest`** harness — fast stdlib-`unittest` coverage of the gate internals
+  (`gatelib` helpers + each gate's pure decision logic), complementing the
+  black-box `smoke.sh`. Runs in well under a second with no model or suite spawned.
+- Smoke test extended with checks for `selftest`, `flake-gate`, and `diff-budget`;
+  `policy.schema.json` documents the new gates' options.
+
 ## [1.0.0-beta.1] — 2026-06-20
 
 First public **beta**. The skill and all gates run end to end (the smoke test passes);

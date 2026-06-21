@@ -1,0 +1,26 @@
+{
+  "_comment": "Policy for the security-gates dogfood example. Tunes secret-scan thresholds.",
+
+  "gates": {
+    "spec-lint": {
+      "spec_file": "REQUIREMENTS.md",
+      "id_pattern": "REQ-\\d+",
+      "acceptance_label": "Acceptance"
+    },
+    "trace-gate": {
+      "spec_file": "REQUIREMENTS.md",
+      "id_pattern": "REQ-\\d+",
+      "test_reqs": "TEST-REQS.yaml",
+      "test_glob": ["test/**/*"]
+    },
+    "redgreen-gate": {
+      "test_command": "python3 -m unittest discover -s test -p 'test_*.py'",
+      "timeout_seconds": 120
+    },
+    "secret-scan": {
+      "min_token_length": 16,
+      "allowlist": [],
+      "fail_on": ["high"]
+    }
+  }
+}

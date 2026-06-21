@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+"""
+flake-gate — Phase 4 exit gate (language-agnostic via configured command).
+
+Runs the test command several times and fails if the suite is non-deterministic:
+some runs pass, some fail. A flaky test is an untrustworthy test — it neither
+locks in behavior nor judges it, so the whole point of the loop (tests you can
+trust) collapses. This catches order-dependence, timing races, and shared-state
+bleed that a single green run hides.
+
+Outcome:
+  - all runs agree (all pass, or all fail)        -> pass   (deterministic)
+  - runs disagree (k passed, N-k failed)          -> fail   (flaky; route: tests)
+  - no test command configured                    -> skip
+
+It deliberately does not care WHETHER the suite is green — that is redgreen-gate's
+job. flake-gate only judges whether the answer is *stable*. Run it after the suite
+is green so a flaky failure is unambiguous.
+
+Contract: see references/gate-contract.md
+Config keys (policy.gates.flake-gate):
+  test_command    shell command to run the suite. Falls back to
+                  policy.gates.redgreen-gate.test_command so you wire it once.
+  runs            how many times to run the suite      (default 3, min 2)
+  timeout_seconds max run time per individual run      (default 600)
+"""
+import os
+import subprocess
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import gatelib  # noqa: E402
+
+GATE, TIER = "flake-gate", 0
+
+
+def classify(outcomes):
+    """Map a list of per-run pass/fail booleans to (status, summary).
+
+    Pure so it can be unit-tested without running anything. `outcomes` is a list
+    of bools (True == that run passed). Disagreement is flakiness.
+    """
+    n = len(outcomes)
+    passed = sum(1 for o in outcomes if o)
+    if n < 2:
+        return "skip", "need at least 2 runs to judge flakiness (got %d)" % n
+    if passed == n:
+        return "pass", "deterministic: all %d runs passed" % n
+    if passed == 0:
+        return "pass", "deterministic: all %d runs failed (stable red)" % n
+    return "fail", "flaky: %d/%d runs passed, %d failed — non-deterministic suite" % (
+        passed, n, n - passed)
+
+
+def main():
+    _p, args = gatelib.parse_args()
+    policy = gatelib.load_policy(args)
+    opts = gatelib.gate_options(policy, GATE)
+    root = args.context or "."
+
+    cmd = opts.get("test_command") or gatelib.gate_options(policy, "redgreen-gate").get("test_command")
+    if not cmd:
+        gatelib.emit(GATE, TIER, "skip",
+                     "no test_command configured (set policy.gates.flake-gate.test_command "
+                     "or reuse policy.gates.redgreen-gate.test_command)")
+
+    runs = max(2, int(opts.get("runs", 3)))
+    timeout = int(opts.get("timeout_seconds", 600))
+
+    outcomes = []
+    for i in range(runs):
+        try:
+            proc = subprocess.run(cmd, shell=True, cwd=root, timeout=timeout,
+                                  capture_output=True, text=True)
+        except subprocess.TimeoutExpired:
+            gatelib.emit(GATE, TIER, "fail",
+                         "test command timed out after %ds on run %d/%d" % (timeout, i + 1, runs),
+                         [gatelib.finding("high", cmd, "A run that hangs is its own kind of flake.")])
+            return
+        outcomes.append(proc.returncode == 0)
+
+    status, summary = classify(outcomes)
+    if status == "fail":
+        seq = ", ".join("pass" if o else "fail" for o in outcomes)
+        gatelib.emit(GATE, TIER, "fail", summary,
+                     [gatelib.finding("high", cmd,
+                      "Run outcomes varied (%s). Tests must be deterministic before they can be trusted." % seq)],
+                     confidence=1.0)
+    gatelib.emit(GATE, TIER, status, summary, confidence=1.0)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as exc:  # noqa: BLE001
+        gatelib.fail_internal(GATE, TIER, exc)

@@ -38,8 +38,9 @@ import gatelib  # noqa: E402
 ROUTE = {
     "spec-lint": "spec", "trace-gate": "tests", "intent-gate": "tests",
     "semantic-test-judge": "tests", "separation-gate": "tests",
-    "redgreen-gate": "code", "mutation": "code", "coverage": "tests",
-    "lint": "code", "fresh-eyes-review": "code",
+    "flake-gate": "tests", "redgreen-gate": "code", "mutation": "code",
+    "coverage": "tests", "lint": "code", "fresh-eyes-review": "code",
+    "diff-budget": "review", "secret-scan": "code",
 }
 
 
