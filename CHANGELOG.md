@@ -3,7 +3,7 @@
 All notable changes to the `fofo` plugin are documented here. This project adheres
 to [Semantic Versioning](https://semver.org).
 
-## [Unreleased]
+## [1.0.0-beta.2] — 2026-06-21
 
 ### Fixed
 - `selftest`: `test_high_patterns_match_aws_and_pem` unpacked `secret-scan`'s
@@ -62,4 +62,5 @@ the beta label invites real-world use and feedback before a stable 1.0.0.
 - **Docs** — README, INSTALL, gate contract, phases & roles, porting guide,
   build/design notes, and a runnable end-to-end smoke test.
 
+[1.0.0-beta.2]: https://github.com/Sweet-Papa-Technologies/Agentic-SDLC/releases/tag/fofo--v1.0.0-beta.2
 [1.0.0-beta.1]: https://github.com/Sweet-Papa-Technologies/Agentic-SDLC/releases/tag/fofo--v1.0.0-beta.1

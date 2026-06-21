@@ -5,7 +5,7 @@
 <p align="center">
   <a href="#install"><img src="https://img.shields.io/badge/Claude%20Code-plugin-1b2440?style=flat-square&labelColor=10b78f" alt="Claude Code plugin"></a>
   <img src="https://img.shields.io/badge/niche-test--integrity-10b78f?style=flat-square" alt="test-integrity">
-  <img src="https://img.shields.io/badge/version-1.0.0--beta.1-7fe3cb?style=flat-square" alt="version 1.0.0-beta.1">
+  <img src="https://img.shields.io/badge/version-1.0.0--beta.2-7fe3cb?style=flat-square" alt="version 1.0.0-beta.2">
   <img src="https://img.shields.io/badge/license-MIT-10b78f?style=flat-square" alt="MIT license">
   <img src="https://img.shields.io/badge/deps-Python%203%20%2B%20Node-1b2440?style=flat-square" alt="deps">
   <img src="https://img.shields.io/badge/contract-stack--agnostic-1b2440?style=flat-square" alt="stack-agnostic contract">
