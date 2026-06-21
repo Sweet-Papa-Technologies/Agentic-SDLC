@@ -1,0 +1,33 @@
+name: gates
+
+# Backstop CI: runs the SDLC skill's own self-tests and end-to-end smoke tests on
+# every push to main and every PR. Red here = broken gates. Pair with a branch
+# protection rule that requires this check so nothing merges red.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: plugins/fofo/skills/sdlc
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Gate unit tests (selftest)
+        run: python3 scripts/selftest
+
+      - name: End-to-end smoke — sample-feature
+        run: bash examples/sample-feature/smoke.sh
+
+      - name: End-to-end smoke — security-gates
+        run: bash examples/security-gates/smoke.sh

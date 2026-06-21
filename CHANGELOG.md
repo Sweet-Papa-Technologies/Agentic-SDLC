@@ -5,6 +5,17 @@ to [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+### Fixed
+- `selftest`: `test_high_patterns_match_aws_and_pem` unpacked `secret-scan`'s
+  `HIGH_PATTERNS` (3-tuples) as 2-tuples, erroring the suite and turning the
+  sample-feature smoke red. Corrected the unpack so all 21 self-tests pass.
+
+### CI / tooling
+- Added `.github/workflows/ci.yml` and a `.githooks/pre-push` gate that both run
+  `selftest` + the sample-feature and security-gates smoke suites, so the repo
+  can't be pushed or merged red. Enable the hook with
+  `git config core.hooksPath .githooks`.
+
 ### Added
 - **`secret-scan`** gate (Tier 0, language-agnostic, key-free) — deterministically
   flags hard-coded secrets: AWS access key IDs and PEM private-key headers hard-fail,

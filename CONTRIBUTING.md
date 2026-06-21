@@ -39,6 +39,16 @@ claude plugin validate ./plugins/fofo
 claude plugin validate .
 ```
 
+Enable the pre-push gate so you (or an agent) can't push the repo red — it runs
+`selftest` + both smoke suites and refuses the push on any failure (this is what
+would have caught the frm-1021 regression):
+
+```bash
+git config core.hooksPath .githooks
+```
+
+The same suites run in CI (`.github/workflows/ci.yml`) on every push and PR.
+
 Any change to a gate must keep `smoke.sh` green. If you add a gate, add a check for
 it in `smoke.sh` and a row in the README gate table.
 

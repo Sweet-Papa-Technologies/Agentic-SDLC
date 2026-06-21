@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Pre-push gate — refuses to push if the FoFo gate suites are red.
+#
+# This is the hard local block that would have stopped the frm-1021 regression:
+# an agent (or human) cannot push this repo while selftest or the smoke tests fail.
+# Enable it once per clone:   git config core.hooksPath .githooks
+# (CI in .github/workflows/ci.yml is the remote backstop.)
+#
+# Override in a genuine emergency with:  git push --no-verify
+set -u
+ROOT="$(git rev-parse --show-toplevel)"
+SDLC="$ROOT/plugins/fofo/skills/sdlc"
+log="$(mktemp)"
+
+run() { # run "<label>" <command...>
+  printf '[pre-push] %s… ' "$1"
+  if "${@:2}" >"$log" 2>&1; then
+    echo "ok"
+  else
+    echo "FAILED"
+    echo "------------------------------------------------------------"
+    tail -12 "$log"
+    echo "------------------------------------------------------------"
+    echo "[pre-push] BLOCKED: '$1' is red. Fix it, or bypass with: git push --no-verify"
+    rm -f "$log"
+    exit 1
+  fi
+}
+
+echo "[pre-push] verifying FoFo gates before push…"
+run "gate unit tests (selftest)"      python3 "$SDLC/scripts/selftest"
+run "smoke — sample-feature"          bash    "$SDLC/examples/sample-feature/smoke.sh"
+run "smoke — security-gates"          bash    "$SDLC/examples/security-gates/smoke.sh"
+rm -f "$log"
+echo "[pre-push] all gate suites green — push allowed ✓"

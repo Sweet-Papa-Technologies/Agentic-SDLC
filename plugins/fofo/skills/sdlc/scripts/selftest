@@ -170,7 +170,7 @@ class TestTraceCollect(unittest.TestCase):
 
 class TestSecretScanPatterns(unittest.TestCase):
     def test_high_patterns_match_aws_and_pem(self):
-        names = {n: re.compile(rx) for n, rx in secretscan.HIGH_PATTERNS}
+        names = {n: rx for n, rx, _sev in secretscan.HIGH_PATTERNS}
         self.assertTrue(names["aws-access-key-id"].search('k = "AKIA1234567890ABCDEF"'))
         self.assertTrue(names["private-key-header"].search("-----BEGIN RSA PRIVATE KEY-----"))
         self.assertIsNone(names["aws-access-key-id"].search("AKIA-too-short"))
