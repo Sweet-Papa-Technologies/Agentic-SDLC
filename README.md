@@ -70,6 +70,8 @@ Every gate — kept or bring-your-own — obeys one I/O contract (`--changed --p
 | `redgreen-gate` | 0 | suite is red before code, green after | ✅ on |
 | `intent-gate` | 0 | catches assertion-free / trivially-true / snapshot-only / banned-mock tests — **real AST** (vendored parser) for JS/TS, token fallback for TS/JSX | ✅ on |
 | `separation-gate` | 0 | fails if one context authored both the tests and the code for a unit | ⚙️ opt-in |
+| `flake-gate` | 0 | re-runs the suite N times; fails if the result is non-deterministic (a flaky test is an untrustworthy test) | ⚙️ opt-in |
+| `diff-budget` | 0 | caps changed lines so a PR stays small enough to actually review (Phase 7); git-diff or line-count mode | ⚙️ opt-in |
 | `mutation` · `coverage` · `lint` | 0 | **bring your own** command, wrapped to the contract | ⚙️ opt-in |
 | `semantic-test-judge` | 1 | model judges whether each test asserts requirement *intent* vs. just touching lines | ⚙️ opt-in |
 | `fresh-eyes-review` | 1 | model scans the diff for cheating, security, silent architecture changes | ⚙️ opt-in |
@@ -118,6 +120,13 @@ The skill ships a runnable end-to-end smoke test (no API key needed — the mode
 ```bash
 cd plugins/fofo/skills/sdlc/examples/sample-feature && bash smoke.sh
 # -> ALL CHECKS PASSED
+```
+
+For a fast inner-loop check of the gate internals (no model, no test suite spawned), run the unit harness:
+
+```bash
+python3 plugins/fofo/skills/sdlc/scripts/selftest
+# -> OK
 ```
 
 ## Updating

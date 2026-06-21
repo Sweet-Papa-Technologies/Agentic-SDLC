@@ -100,6 +100,34 @@ check "runner reports fail/escalate on a tainted suite" 1 "$C7"
 rm -f test/weak.test.js
 
 # ---------------------------------------------------------------------------
+hr "CHECK 8: selftest — gate-internal unit tests all pass"
+python3 "$SCRIPTS/selftest" >/tmp/fofo_selftest.out 2>&1; C8=$?
+tail -3 /tmp/fofo_selftest.out
+check "gatelib + gate unit tests pass" 0 "$C8"
+
+# ---------------------------------------------------------------------------
+hr "CHECK 9: flake-gate flags a non-deterministic suite, passes a stable one"
+printf 'n=$(cat .flakectr 2>/dev/null || echo 0); echo $((n+1)) > .flakectr; test $((n %% 2)) -eq 0\n' > flaky.sh
+printf '{"gates":{"flake-gate":{"test_command":"bash flaky.sh","runs":3}}}\n' > flake.policy.json
+python3 "$SCRIPTS/flake-gate" --policy flake.policy.json --context .; C9A=$?
+check "flaky command (alternating pass/fail) -> fail" 1 "$C9A"
+printf '{"gates":{"flake-gate":{"test_command":"true","runs":3}}}\n' > stable.policy.json
+python3 "$SCRIPTS/flake-gate" --policy stable.policy.json --context .; C9B=$?
+check "deterministic command -> pass" 0 "$C9B"
+rm -f .flakectr
+
+# ---------------------------------------------------------------------------
+hr "CHECK 10: diff-budget escalates an over-budget change, passes a small one"
+python3 -c "open('big.gen','w').write('x\n'*50)"
+printf '{"gates":{"diff-budget":{"max_lines":10,"count_mode":"lines"}}}\n' > budget.policy.json
+python3 "$SCRIPTS/diff-budget" --policy budget.policy.json --context . --changed "big.gen"; C10A=$?
+check "50-line change over budget 10 -> escalate" 2 "$C10A"
+python3 -c "open('small.gen','w').write('x\n'*3)"
+python3 "$SCRIPTS/diff-budget" --policy budget.policy.json --context . --changed "small.gen"; C10B=$?
+check "3-line change under budget 10 -> pass" 0 "$C10B"
+rm -f big.gen small.gen
+
+# ---------------------------------------------------------------------------
 hr "RESULT"
 if [ "$FAILS" -eq 0 ]; then echo "ALL CHECKS PASSED"; exit 0
 else echo "$FAILS CHECK(S) FAILED"; exit 1; fi

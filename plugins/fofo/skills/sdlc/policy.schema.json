@@ -41,6 +41,25 @@
           },
           "additionalProperties": false
         },
+        "flake-gate": {
+          "type": "object",
+          "properties": {
+            "test_command": { "type": ["string", "null"], "description": "Shell command that runs the suite. Falls back to redgreen-gate.test_command." },
+            "runs": { "type": "integer", "minimum": 2, "default": 3, "description": "How many times to run the suite to judge determinism." },
+            "timeout_seconds": { "type": "integer", "minimum": 1, "default": 600 }
+          },
+          "additionalProperties": false
+        },
+        "diff-budget": {
+          "type": "object",
+          "properties": {
+            "max_lines": { "type": "integer", "minimum": 1, "default": 400, "description": "Budget for added+deleted lines before the change is too big to review." },
+            "base_ref": { "type": "string", "default": "HEAD", "description": "Git ref to diff against in git mode." },
+            "count_mode": { "enum": ["auto", "git", "lines"], "default": "auto", "description": "git: numstat vs base_ref. lines: total line count of --changed. auto: git when in a work tree, else lines." },
+            "on_exceed": { "enum": ["escalate", "fail"], "default": "escalate", "description": "Status emitted when over budget." }
+          },
+          "additionalProperties": false
+        },
         "intent-gate": {
           "type": "object",
           "properties": {
@@ -60,6 +79,29 @@
           "type": "object",
           "properties": {
             "manifest": { "type": ["string", "null"], "description": "Path to PROVENANCE.yaml/.json." }
+          },
+          "additionalProperties": false
+        },
+        "secret-scan": {
+          "type": "object",
+          "properties": {
+            "min_token_length": { "type": "integer", "minimum": 1, "default": 16, "description": "Min length of a quoted literal to flag a secret-looking assignment." },
+            "allowlist": { "type": "array", "items": { "type": "string" }, "description": "Regexes; any line matching one is skipped (placeholders, fixtures)." },
+            "fail_on": { "type": "array", "items": { "enum": ["low", "med", "high"] }, "description": "Severities that hard-fail instead of escalating.", "default": ["high"] },
+            "patterns": {
+              "type": "array",
+              "description": "Extra detectors appended to the built-ins.",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": { "type": "string" },
+                  "regex": { "type": "string" },
+                  "severity": { "enum": ["low", "med", "high"] }
+                },
+                "required": ["name", "regex"],
+                "additionalProperties": false
+              }
+            }
           },
           "additionalProperties": false
         },

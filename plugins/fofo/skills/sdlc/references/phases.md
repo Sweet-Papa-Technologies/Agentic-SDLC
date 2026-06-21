@@ -78,8 +78,10 @@ Exit: `redgreen-gate --expect green` (suite green).
 ### Phase 4 — Verification (Referee, Tier 0)
 `gate-runner` runs the enabled Tier-0 gates fail-fast in tier order:
 `trace-gate`, `intent-gate`, `redgreen-gate`, and if enabled `mutation`,
-`coverage`, `separation-gate`. One aggregate verdict; one exit code.
-Exit: all hard gates pass or escalate.
+`coverage`, `separation-gate`, `flake-gate`. One aggregate verdict; one exit code.
+`flake-gate` re-runs the suite N times and fails on a non-deterministic result —
+run it after green, since it judges whether the green is *stable*, not whether it's
+green. Exit: all hard gates pass or escalate.
 
 ### Phase 5 — Fresh-Eyes Review (Referee, Tier 1, third context)
 With model gates enabled, the run continues into `semantic-test-judge` (do the
@@ -94,14 +96,22 @@ Hand the Operator the runner's `escalation` array only — each item is
 diffs. The Operator resolves; nothing else proceeds until they do.
 
 ### Phase 7 — Integration
-Keep PRs reviewable, then merge. A **diff-budget** check is a bring-your-own gate:
-wrap a size check with the adapter, e.g.
+Keep PRs reviewable, then merge. The kept **diff-budget** gate caps how much a
+change touches (a diff a human can't hold doesn't get a real review). Enable it and
+set the budget:
 
 ```json
-{ "name": "diff-budget", "tier": 0, "enabled": true, "waivable": true,
-  "command": ["./scripts/adapter", "--name", "diff-budget", "--tier", "0", "--",
-              "bash", "-c", "test $(git diff --cached --numstat | wc -l) -le 40"] }
+{ "name": "diff-budget", "tier": 0, "enabled": true, "script": "diff-budget", "waivable": true }
 ```
+```json
+// policy.gates.diff-budget
+{ "max_lines": 400, "base_ref": "HEAD", "count_mode": "auto", "on_exceed": "escalate" }
+```
+
+It auto-selects git-diff mode in a work tree (added+deleted vs `base_ref`) and falls
+back to counting the `--changed` files' lines when there's no repo. Being `waivable`,
+an over-budget change escalates to the Operator instead of hard-blocking — a big
+change can still ship once a human signs off on the size.
 
 ## Loop-back routing
 
@@ -110,7 +120,8 @@ wrap a size check with the adapter, e.g.
 | Gate | Route | Goes to |
 |------|-------|---------|
 | `redgreen-gate` (green fail), `mutation`, `lint`, `fresh-eyes-review` | `code` | **Author** |
-| `trace-gate`, `intent-gate`, `semantic-test-judge`, `separation-gate` | `tests` | **Judge** (fresh pass) |
+| `trace-gate`, `intent-gate`, `semantic-test-judge`, `separation-gate`, `flake-gate` | `tests` | **Judge** (fresh pass) |
+| `diff-budget` | `review` | **Operator** (size sign-off) |
 | `spec-lint` | `spec` | **Operator** |
 
 The Author fixes code; the Judge fixes tests. The Author never edits the tests

@@ -1,0 +1,192 @@
+#!/usr/bin/env python3
+"""
+selftest — fast unit tests for the FoFo gate internals.
+
+The smoke test (examples/sample-feature/smoke.sh) proves the gates end-to-end as
+black boxes. This complements it: it reaches *inside* the gates and exercises the
+pure decision logic directly — the part most likely to grow a subtle bug — without
+spawning a test suite or a model. Stdlib `unittest` only, no third-party deps, no
+network. Runs in well under a second.
+
+    python3 scripts/selftest          # run all
+    python3 scripts/selftest -v       # verbose
+
+Exit 0 if every test passes, non-zero otherwise — so it can itself be wired as a
+BYO gate (adapter --name selftest -- python3 scripts/selftest) if you want the
+harness to guard its own gates.
+"""
+import contextlib
+import importlib.util
+import os
+import re
+import sys
+import tempfile
+import unittest
+
+SCRIPTS = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, SCRIPTS)
+import gatelib  # noqa: E402
+
+
+@contextlib.contextmanager
+def _in_dir(path):
+    """Temporarily chdir into `path`, restoring CWD afterward."""
+    prev = os.getcwd()
+    os.chdir(path)
+    try:
+        yield
+    finally:
+        os.chdir(prev)
+
+
+def load_gate(name):
+    """Import a gate script (no .py extension) as a module without running main()."""
+    path = os.path.join(SCRIPTS, name)
+    spec = importlib.util.spec_from_loader(
+        "fofo_gate_" + name.replace("-", "_"),
+        importlib.machinery.SourceFileLoader("fofo_gate_" + name.replace("-", "_"), path),
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+flake = load_gate("flake-gate")
+diffbudget = load_gate("diff-budget")
+separation = load_gate("separation-gate")
+trace = load_gate("trace-gate")
+secretscan = load_gate("secret-scan")
+
+
+class TestGatelib(unittest.TestCase):
+    def test_split_patterns_handles_comma_space_and_repeats(self):
+        self.assertEqual(
+            gatelib.split_patterns(["a.js, b.js", "  c.js "]),
+            ["a.js", "b.js", "c.js"],
+        )
+
+    def test_split_patterns_empty(self):
+        self.assertEqual(gatelib.split_patterns([]), [])
+        self.assertEqual(gatelib.split_patterns(None), [])
+
+    def test_expand_changed_globs_and_dedupes(self):
+        # chdir into the temp dir so the bare glob resolves there, not in CWD
+        # (expand_changed tries the raw pattern against CWD before the rooted one).
+        with tempfile.TemporaryDirectory() as d, _in_dir(d):
+            for n in ("one.py", "two.py", "note.txt"):
+                with open(os.path.join(d, n), "w") as fh:
+                    fh.write("x\n")
+            got = gatelib.expand_changed(["*.py", "one.py"], root=".")
+            self.assertEqual(sorted(os.path.basename(p) for p in got), ["one.py", "two.py"])
+
+    def test_expand_changed_walks_directories(self):
+        # chdir in so the bare "test" dir resolves here, not against an unrelated CWD.
+        with tempfile.TemporaryDirectory() as d, _in_dir(d):
+            os.makedirs("test")
+            with open(os.path.join("test", "a_test.js"), "w") as fh:
+                fh.write("1\n")
+            got = gatelib.expand_changed(["test"], root=".")
+            self.assertEqual([os.path.basename(p) for p in got], ["a_test.js"])
+
+    def test_gate_options_missing_returns_empty(self):
+        self.assertEqual(gatelib.gate_options({}, "nope"), {})
+        self.assertEqual(gatelib.gate_options({"gates": {"x": {"k": 1}}}, "x"), {"k": 1})
+
+    def test_emit_exit_codes_map_from_status(self):
+        self.assertEqual(gatelib.STATUS_EXIT["pass"], 0)
+        self.assertEqual(gatelib.STATUS_EXIT["fail"], 1)
+        self.assertEqual(gatelib.STATUS_EXIT["escalate"], 2)
+        self.assertEqual(gatelib.STATUS_EXIT["skip"], 3)
+
+
+class TestFlakeGate(unittest.TestCase):
+    def test_all_pass_is_deterministic(self):
+        status, _ = flake.classify([True, True, True])
+        self.assertEqual(status, "pass")
+
+    def test_all_fail_is_stable_red(self):
+        status, summary = flake.classify([False, False])
+        self.assertEqual(status, "pass")
+        self.assertIn("red", summary)
+
+    def test_mixed_outcomes_is_flaky(self):
+        status, summary = flake.classify([True, False, True])
+        self.assertEqual(status, "fail")
+        self.assertIn("flaky", summary)
+
+    def test_single_run_cannot_judge(self):
+        status, _ = flake.classify([True])
+        self.assertEqual(status, "skip")
+
+
+class TestDiffBudget(unittest.TestCase):
+    def test_sum_numstat_adds_and_deletes(self):
+        out = "10\t2\tsrc/a.py\n3\t0\tsrc/b.py\n"
+        self.assertEqual(diffbudget.sum_numstat(out), 15)
+
+    def test_sum_numstat_skips_binary(self):
+        out = "-\t-\tassets/logo.png\n5\t5\tsrc/c.py\n"
+        self.assertEqual(diffbudget.sum_numstat(out), 10)
+
+    def test_sum_numstat_ignores_garbage_lines(self):
+        self.assertEqual(diffbudget.sum_numstat("not numstat\n\n"), 0)
+
+    def test_count_file_lines(self):
+        with tempfile.TemporaryDirectory() as d:
+            p1 = os.path.join(d, "a.txt")
+            p2 = os.path.join(d, "b.txt")
+            with open(p1, "w") as fh:
+                fh.write("l1\nl2\nl3\n")      # 3 lines
+            with open(p2, "w") as fh:
+                fh.write("only\nno-newline")  # 2 lines, last unterminated
+            self.assertEqual(diffbudget.count_file_lines([p1, p2]), 5)
+
+
+class TestSeparationParse(unittest.TestCase):
+    def test_yaml_subset(self):
+        units = separation.parse_units(
+            "units:\n  - unit: validator\n    tests_by: judge\n    code_by: author\n")
+        self.assertEqual(units, [{"unit": "validator", "tests_by": "judge", "code_by": "author"}])
+
+    def test_json_form(self):
+        units = separation.parse_units('{"units": [{"unit": "p", "tests_by": "j", "code_by": "j"}]}')
+        self.assertEqual(units[0]["tests_by"], units[0]["code_by"])
+
+
+class TestTraceCollect(unittest.TestCase):
+    def test_collect_requirement_ids_from_headings(self):
+        import re
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as fh:
+            fh.write("### REQ-001: Title\nAcceptance: x\n\nProse REQ-999 inline only.\n- REQ-002: bullet\n")
+            name = fh.name
+        try:
+            ids = trace.collect_requirement_ids(name, re.compile(r"REQ-\d+"))
+            self.assertIn("REQ-001", ids)
+            self.assertIn("REQ-002", ids)
+            self.assertNotIn("REQ-999", ids)  # inline prose mention is not a declaration
+        finally:
+            os.unlink(name)
+
+
+class TestSecretScanPatterns(unittest.TestCase):
+    def test_high_patterns_match_aws_and_pem(self):
+        names = {n: re.compile(rx) for n, rx in secretscan.HIGH_PATTERNS}
+        self.assertTrue(names["aws-access-key-id"].search('k = "AKIA1234567890ABCDEF"'))
+        self.assertTrue(names["private-key-header"].search("-----BEGIN RSA PRIVATE KEY-----"))
+        self.assertIsNone(names["aws-access-key-id"].search("AKIA-too-short"))
+
+    def test_assign_re_extracts_quoted_literal(self):
+        m = secretscan.ASSIGN_RE.search('api_key = "abcdefghijklmnopqrstuvwx"')
+        self.assertIsNotNone(m)
+        self.assertEqual(len(m.group(1)), 24)
+
+    def test_assign_re_ignores_non_secret_identifiers(self):
+        self.assertIsNone(secretscan.ASSIGN_RE.search('username = "alice"'))
+
+    def test_is_binary_detects_null_byte(self):
+        self.assertTrue(secretscan.is_binary("abc\x00def"))
+        self.assertFalse(secretscan.is_binary("plain text"))
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2 if "-v" in sys.argv else 1)

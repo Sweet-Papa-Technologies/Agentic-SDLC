@@ -16,12 +16,28 @@
       "test_command": null,
       "timeout_seconds": 600
     },
+    "flake-gate": {
+      "test_command": null,
+      "runs": 3,
+      "timeout_seconds": 600
+    },
+    "diff-budget": {
+      "max_lines": 400,
+      "base_ref": "HEAD",
+      "count_mode": "auto",
+      "on_exceed": "escalate"
+    },
     "intent-gate": {
       "test_launchers": ["it", "test", "fit", "xit", "specify"],
       "assertion_roots": ["should"],
       "banned_mocks": [],
       "allow_snapshot_only": false,
       "fail_on": ["assertion-free", "trivial"]
+    },
+    "secret-scan": {
+      "min_token_length": 16,
+      "allowlist": [],
+      "fail_on": ["high"]
     },
     "separation-gate": {
       "manifest": null

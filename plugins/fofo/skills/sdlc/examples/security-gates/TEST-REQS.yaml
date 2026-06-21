@@ -1,0 +1,96 @@
+# Test requirements for the security & reviewability gates.
+# Maps every requirement ID to one or more concrete, observable test intents.
+# Authored from REQUIREMENTS.md + references/gate-contract.md ONLY.
+# Each gate prints exactly one JSON verdict {gate,tier,status,summary,findings[],confidence};
+# the exit code is authoritative and every intent asserts BOTH exit code and JSON.
+
+requirements:
+  - id: REQ-001
+    gate: secret-scan
+    title: Detect high-severity secrets in changed files
+    intents:
+      - >-
+        Scanning a file containing an AWS access key id (AKIA + 16 uppercase
+        alnum) exits 1 and yields at least one high-severity finding whose
+        location is that file:line.
+      - >-
+        Scanning a file containing a PEM private-key header
+        (-----BEGIN ... PRIVATE KEY-----) exits 1 with a high-severity finding
+        located at that file:line.
+    tests:
+      - test_secret_scan.py::test_aws_access_key_is_high_severity_fail
+      - test_secret_scan.py::test_pem_private_key_header_is_high_severity_fail
+
+  - id: REQ-002
+    gate: secret-scan
+    title: Pass cleanly when no secrets are present
+    intents:
+      - >-
+        Scanning a file of ordinary source with no secret patterns exits 0 with
+        an empty findings array.
+    tests:
+      - test_secret_scan.py::test_clean_file_passes_with_no_findings
+
+  - id: REQ-003
+    gate: secret-scan
+    title: Generic secret assignments escalate rather than hard-fail
+    intents:
+      - >-
+        A file whose only secret-like content is api_key = "<24+ char literal>"
+        (no high-severity pattern) exits 2 (escalate) with a med-severity
+        finding for that line.
+      - >-
+        min_token_length under policy.gates.secret-scan is honored: a quoted
+        literal shorter than the configured length does not trigger a finding
+        (clean pass).
+    tests:
+      - test_secret_scan.py::test_generic_secret_assignment_escalates_med
+      - test_secret_scan.py::test_min_token_length_below_threshold_passes
+
+  - id: REQ-004
+    gate: secret-scan
+    title: Allowlisted lines are ignored
+    intents:
+      - >-
+        When policy.gates.secret-scan.allowlist contains a regex matching the
+        line, a file whose only secret is on that line exits 0 with no findings.
+    tests:
+      - test_secret_scan.py::test_allowlisted_secret_line_is_ignored
+
+  - id: REQ-005
+    gate: secret-scan
+    title: Skip when there is nothing to scan
+    intents:
+      - >-
+        Invoking the gate with no existing files in --changed exits 3 (skip) and
+        still prints one contract-shaped JSON verdict (status skip).
+    tests:
+      - test_secret_scan.py::test_no_existing_files_skips
+
+  - id: REQ-006
+    gate: secret-scan
+    title: Detect secret-looking assignments across common formats
+    intents:
+      - >-
+        A file whose only secret-like content is a quoted-key JSON entry
+        "api_key": "<24+ char value>" exits 2 (escalate) with a med-severity
+        finding for that line, with min_token_length set explicitly in policy.
+      - >-
+        A file whose only secret-like content is an unquoted env/YAML scalar
+        API_KEY=<24+ char value> (no quotes) likewise exits 2 (escalate) with a
+        med-severity finding for that line, honoring min_token_length.
+    tests:
+      - test_secret_scan.py::test_quoted_key_json_secret_escalates_med
+      - test_secret_scan.py::test_unquoted_env_style_secret_escalates_med
+
+  - id: REQ-007
+    gate: secret-scan
+    title: A malformed allowlist regex never crashes the gate
+    intents:
+      - >-
+        With policy.gates.secret-scan.allowlist containing an un-compilable
+        regex ("[invalid(") while scanning a file with a hard-coded AWS key,
+        the gate exits 1 (the key is still detected) and the exit code is < 10
+        (never an internal error), still yielding a high-severity finding.
+    tests:
+      - test_secret_scan.py::test_malformed_allowlist_regex_does_not_crash
