@@ -80,6 +80,44 @@ Four roles, run as separate contexts where the host allows (see [Guarantees & li
 
 When verification fails, the runner tags each escalation with a **route**: `code` failures go back to the Author, `tests` failures go back to the Judge in a fresh pass. **The Author never edits the tests that grade it.**
 
+## The loop
+
+Running `/fofo:sdlc` choreographs eight phases. Each has an **exit gate** — nothing proceeds until it passes or the failure is escalated to a human.
+
+| Phase | Role | What happens | Exit gate |
+|:------|:-----|:-------------|:----------|
+| **0 · Spec & Design** | Operator | Each requirement gets a stable ID + acceptance criteria (`REQUIREMENTS.md`) | `spec-lint` |
+| **1 · Test Requirements** | Judge · spec-only | Map every requirement → test intents (`TEST-REQS.yaml`) | `trace-gate` |
+| **2 · Test Authoring** | Judge · tests-first | Write the tests, tagged by requirement ID — **red**, because no code exists yet | `redgreen --expect red` |
+| **3 · Implementation** | Author · separate ctx | Write code to turn the suite green; never touch the tests | `redgreen --expect green` |
+| **4 · Verification** | Referee · Tier 0 | Run the gate runner: `trace` · `intent` · `secret-scan` (+ opt-in `mutation`/`coverage`/`separation`/`flake`/`diff-budget`) | all hard gates pass, or escalate |
+| **5 · Fresh-Eyes Review** | Reviewer · Tier 1 | Model gates: `semantic-test-judge` + `fresh-eyes-review` (cheating / security / silent changes) | clean, or escalate |
+| **6 · Human Escalation** | Operator · Tier 2 | Gets only the tight escalation payload — gate, route, findings — *not* raw diffs | Operator decides |
+| **7 · Integration** | — | Keep the PR small enough to review (`diff-budget`), then merge | merge |
+
+**Loop-back (the critical rule):** a failed gate routes back to whoever owns the fix — `code` failures to the **Author**, `tests` failures to the **Judge** in a fresh pass. The Author can never edit the tests that grade it.
+
+### What a run produces
+
+The Referee (`gate-runner`) emits **one JSON verdict and one exit code** — the shared enforcement surface that makes the loop wireable into CI or a pre-merge hook instead of being advice the model may ignore (abbreviated):
+
+```jsonc
+{
+  "overall_status": "fail",          // pass · fail · escalate
+  "overall_exit": 1,                 // 0 pass · 1 fail · 2 escalate · 3 skip
+  "gates": [
+    { "gate": "secret-scan", "status": "pass" },
+    { "gate": "intent-gate", "status": "fail", "route": "tests",
+      "summary": "1 test asserts no intent",
+      "findings": [{ "severity": "high", "location": "test/slug.test.js:9",
+                     "detail": "Test \"builds a slug\" is assertion-free." }] }
+  ],
+  "escalation": [
+    { "gate": "intent-gate", "route": "tests", "summary": "1 test asserts no intent" }
+  ]
+}
+```
+
 ## The gates
 
 Every gate — kept or bring-your-own — obeys one I/O contract (`--changed --policy`, prints one JSON verdict, exits `0` pass / `1` fail / `2` escalate / `3` skip). Mix and match; point config at your stack.
@@ -171,6 +209,23 @@ python3 plugins/fofo/skills/sdlc/scripts/selftest
 ## Updating
 
 Bump `version` in `plugins/fofo/.claude-plugin/plugin.json` and the matching entry in `.claude-plugin/marketplace.json`, commit, tag with `claude plugin tag ./plugins/fofo`, and push. Users get it via `/plugin marketplace update fofo-marketplace`.
+
+## Scope & status
+
+**Beta.** The engine is sound and every suite passes end to end (`selftest` + both smokes, gated in CI and a pre-push hook); the label invites real-world use before a stable 1.0.
+
+What it does **today**:
+- A test-first loop with **separated** test-author and code-author contexts (hard isolation on Claude Code subagents).
+- Deterministic Tier-0 gates on every change (`spec-lint`, `trace-gate`, `redgreen-gate`, `intent-gate`, `secret-scan`); opt-in `separation`, `flake`, `diff-budget`, and model-based Tier-1 review.
+- **One gate contract**, so any tool — mutation, coverage, lint — drops in and routes failures the same way.
+
+What it deliberately **doesn't** do yet — and where your ideas come in:
+- It's a **library of gates + a procedure**, not a hosted service: CI integration is one example GitHub Action, not a turnkey app.
+- `intent-gate` is deepest on **JS/TS**; other languages are token-level until a parser is contributed.
+- Separation is **best-effort** on hosts without context isolation.
+- No dashboard, metrics, or historical trend tracking.
+
+Have an idea for what it *should* do? **[Open an issue or discussion →](https://github.com/Sweet-Papa-Technologies/Agentic-SDLC/issues)**
 
 ## Contributing & License
 
