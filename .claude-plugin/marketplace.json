@@ -9,7 +9,7 @@
       "name": "fofo",
       "source": "./plugins/fofo",
       "description": "Test-first agentic SDLC loop with separated authorship and judgment: an independent context writes tests from the spec before the code, code is written against those tests, then the tests themselves are graded and only what the gates can't resolve is escalated.",
-      "version": "1.0.0-beta.3",
+      "version": "1.0.0-beta.4",
       "author": {
         "name": "Forrester Terry"
       }

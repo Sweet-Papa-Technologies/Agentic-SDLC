@@ -42,6 +42,7 @@ ROUTE = {
     "coverage": "tests", "lint": "code", "fresh-eyes-review": "code",
     "diff-budget": "review", "secret-scan": "code",
     "test-lock": "review", "oversight-integrity": "review", "deps-gate": "review",
+    "eval-gate": "code", "trajectory-judge": "review",
 }
 
 

@@ -104,11 +104,16 @@ def main():
 
     paths = gatelib.split_patterns(args.changed)
     files = gatelib.expand_changed(args.changed, root)
+    # Hand git real file paths, not raw globs: git's pathspec wildmatch treats
+    # "src/**/*" differently from the shell and can silently match nothing,
+    # under-counting the diff to 0. Raw patterns remain the fallback so
+    # deleted-only changes (no file left to expand) still count.
+    git_paths = [os.path.relpath(f, root) for f in files] or paths
 
     use_git = count_mode == "git" or (count_mode == "auto" and is_git_repo(root))
     total, mode = None, None
     if use_git:
-        total = git_diff_lines(root, base_ref, paths)
+        total = git_diff_lines(root, base_ref, git_paths)
         if total is not None:
             mode = "git"
     if total is None:

@@ -1,0 +1,136 @@
+#!/usr/bin/env python3
+"""
+eval-gate — red/green for code whose outputs are nondeterministic.
+
+A lot of the code agents write now IS an LLM app, and a probabilistic unit
+breaks redgreen semantics: one green run proves almost nothing, one red run
+condemns almost nothing. This gate generalizes flake-gate's repetition idea
+into an eval harness wrapper: run the project's eval command N times and hold
+the aggregate to a threshold.
+
+Two aggregation modes, usable together:
+  pass rate  : each trial's exit code is pass/fail; trials_passed/trials must
+               reach min_pass_rate (default 1.0 — deterministic code keeps
+               deterministic expectations).
+  mean score : with score_regex set, a float is extracted from each trial's
+               stdout (e.g. an accuracy your golden-dataset harness prints) and
+               the mean must reach min_score.
+
+The eval command is BYO — point it at your harness (pytest evals, promptfoo,
+a script over a golden dataset). No eval framework is shipped or assumed.
+Skips without a command. OFF by default: it runs your suite N times.
+
+Contract: see references/gate-contract.md
+Config keys (policy.gates.eval-gate):
+  eval_command     shell command for ONE trial            (required to run)
+  trials           how many times to run it               (default 3)
+  min_pass_rate    passed/total floor, 0.0-1.0            (default 1.0)
+  score_regex      regex with one float group, matched
+                   against each trial's stdout            (default null)
+  min_score        mean-score floor when score_regex set  (default null)
+  timeout_seconds  per-trial timeout                      (default 600)
+  on_fail          "fail" | "escalate"                    (default "fail")
+"""
+import os
+import re
+import subprocess
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import gatelib  # noqa: E402
+
+GATE, TIER = "eval-gate", 0
+
+
+def parse_score(stdout, score_re):
+    """Extract the last score match from a trial's stdout, or None."""
+    matches = score_re.findall(stdout or "")
+    if not matches:
+        return None
+    last = matches[-1]
+    if isinstance(last, tuple):  # regex had multiple groups; take the first
+        last = last[0]
+    try:
+        return float(last)
+    except (TypeError, ValueError):
+        return None
+
+
+def classify(outcomes, min_pass_rate, min_score):
+    """Map trial outcomes to (status, summary, findings_detail).
+
+    outcomes: list of (passed: bool, score: float|None). Pure: unit-testable
+    without running anything.
+    """
+    n = len(outcomes)
+    passed = sum(1 for ok, _ in outcomes if ok)
+    pass_rate = passed / n if n else 0.0
+    scores = [s for _, s in outcomes if s is not None]
+    mean_score = sum(scores) / len(scores) if scores else None
+
+    problems = []
+    if pass_rate < min_pass_rate:
+        problems.append("pass rate %.2f below floor %.2f (%d/%d trials passed)" % (
+            pass_rate, min_pass_rate, passed, n))
+    if min_score is not None:
+        if mean_score is None:
+            problems.append("min_score %.2f set but no score matched in any trial's output" % min_score)
+        elif mean_score < min_score:
+            problems.append("mean score %.3f below floor %.3f over %d scored trial(s)" % (
+                mean_score, min_score, len(scores)))
+
+    summary = "%d/%d trial(s) passed" % (passed, n)
+    if mean_score is not None:
+        summary += ", mean score %.3f" % mean_score
+    if problems:
+        return "fail", summary + " — " + "; ".join(problems), problems
+    return "pass", summary, []
+
+
+def main():
+    _p, args = gatelib.parse_args()
+    policy = gatelib.load_policy(args)
+    opts = gatelib.gate_options(policy, GATE)
+    root = args.context or "."
+
+    cmd = opts.get("eval_command")
+    if not cmd:
+        gatelib.emit(GATE, TIER, "skip",
+                     "no eval_command configured (policy.gates.eval-gate.eval_command)")
+
+    trials = max(1, int(opts.get("trials", 3)))
+    min_pass_rate = float(opts.get("min_pass_rate", 1.0))
+    min_score = opts.get("min_score", None)
+    min_score = float(min_score) if min_score is not None else None
+    timeout = int(opts.get("timeout_seconds", 600))
+    on_fail = opts.get("on_fail", "fail")
+    if on_fail not in ("fail", "escalate"):
+        on_fail = "fail"
+    score_re = re.compile(opts["score_regex"]) if opts.get("score_regex") else None
+
+    outcomes = []
+    for i in range(trials):
+        try:
+            proc = subprocess.run(cmd, shell=True, cwd=root, capture_output=True,
+                                  text=True, timeout=timeout)
+            ok = proc.returncode == 0
+            score = parse_score(proc.stdout, score_re) if score_re else None
+        except subprocess.TimeoutExpired:
+            ok, score = False, None
+        outcomes.append((ok, score))
+        sys.stderr.write("[eval-gate] trial %d/%d: %s%s\n" % (
+            i + 1, trials, "pass" if ok else "FAIL",
+            "" if score is None else " (score %.3f)" % score))
+
+    status, summary, problems = classify(outcomes, min_pass_rate, min_score)
+    if status == "fail":
+        findings = [gatelib.finding("high", "eval-gate", p) for p in problems]
+        gatelib.emit(GATE, TIER, on_fail, summary, findings, confidence=1.0)
+    gatelib.emit(GATE, TIER, "pass", summary, confidence=1.0)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as exc:  # noqa: BLE001
+        gatelib.fail_internal(GATE, TIER, exc)

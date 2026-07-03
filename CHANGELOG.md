@@ -3,6 +3,41 @@
 All notable changes to the `fofo` plugin are documented here. This project adheres
 to [Semantic Versioning](https://semver.org).
 
+## [1.0.0-beta.4] — 2026-07-03
+
+Process-auditing + nondeterministic-code release: the loop can now judge *how*
+the code was produced, not just what it looks like, and hold LLM-app code to
+eval floors instead of one-shot red/green.
+
+### Added
+- **`trajectory-judge`** gate (Tier 1, model-based, opt-in) — the model reads
+  the Author's exported transcript (`policy.gates.trajectory-judge.transcript_file`)
+  and hunts six cheat signals: intent-to-game, test-tampering,
+  hardcoded-expectation, forbidden-channel, oversight-tampering, misreporting.
+  High-confidence signals hard-fail; anything suspicious escalates to the
+  Operator (`route: review`). Trajectory-level monitoring is the strongest
+  countermeasure in 2026 reward-hacking research; this packages it behind the
+  standard gate contract. Head+tail truncation keeps long transcripts in budget.
+- **`eval-gate`** gate (Tier 0, language-agnostic, opt-in) — red/green for
+  nondeterministic code. Runs a BYO `eval_command` N trials and holds the
+  aggregate to floors: `min_pass_rate` over exit codes, and optionally
+  `min_score` over a mean score extracted from stdout via `score_regex` (e.g.
+  a golden-dataset accuracy). One green run of a probabilistic unit proves
+  nothing; N runs against a floor is a verdict.
+- **`references/asdlc-landscape.md`** — one-page honest positioning: what
+  Spec Kit / Kiro / BMAD / AI-DLC / TDD-Guard / mutation testing each own, why
+  none of them owns test integrity, and the concrete docking points for using
+  FoFo underneath each.
+- Smoke test extended with checks for `test-lock`, `eval-gate`, and
+  `trajectory-judge`; the mock model endpoint is now prompt-aware so both
+  Tier-1 gate shapes are exercised without an API key. `selftest` 42 → 56.
+
+### Fixed
+- `diff-budget` (git mode) now expands `--changed` globs to real file paths
+  before handing them to git: git's pathspec wildmatch treats `src/**/*`
+  differently from the shell and could silently match nothing, under-counting
+  the diff to 0 lines. Found by the beta.4 end-to-end run.
+
 ## [1.0.0-beta.3] — 2026-07-03
 
 Agentic-integrity + SDD-interop release: closes the gaps 2026 reward-hacking
@@ -101,6 +136,7 @@ the beta label invites real-world use and feedback before a stable 1.0.0.
 - **Docs** — README, INSTALL, gate contract, phases & roles, porting guide,
   build/design notes, and a runnable end-to-end smoke test.
 
+[1.0.0-beta.4]: https://github.com/Sweet-Papa-Technologies/Agentic-SDLC/releases/tag/fofo--v1.0.0-beta.4
 [1.0.0-beta.3]: https://github.com/Sweet-Papa-Technologies/Agentic-SDLC/releases/tag/fofo--v1.0.0-beta.3
 [1.0.0-beta.2]: https://github.com/Sweet-Papa-Technologies/Agentic-SDLC/releases/tag/fofo--v1.0.0-beta.2
 [1.0.0-beta.1]: https://github.com/Sweet-Papa-Technologies/Agentic-SDLC/releases/tag/fofo--v1.0.0-beta.1

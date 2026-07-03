@@ -33,6 +33,8 @@
       "_note": "Enable once you maintain a PROVENANCE manifest to enforce Author != Judge." },
     { "name": "flake-gate",       "tier": 0, "enabled": false, "script": "flake-gate",
       "_note": "Re-runs the suite N times to catch non-determinism. Reuses redgreen-gate.test_command unless you set policy.gates.flake-gate.test_command. Off by default — it runs the suite multiple times." },
+    { "name": "eval-gate",        "tier": 0, "enabled": false, "script": "eval-gate",
+      "_note": "Red/green for nondeterministic (LLM-app) code: runs policy.gates.eval-gate.eval_command N trials, holds pass rate (and optional mean score via score_regex) to a floor. BYO harness. Off by default — it runs your evals N times." },
     { "name": "diff-budget",      "tier": 0, "enabled": false, "script": "diff-budget", "waivable": true,
       "_note": "Phase 7 reviewability cap. Set policy.gates.diff-budget.max_lines/base_ref. A fail escalates (waivable) so a justified big change can proceed after a human looks." },
 
@@ -50,6 +52,8 @@
     { "name": "semantic-test-judge", "tier": 1, "enabled": false, "script": "semantic-test-judge",
       "_note": "Needs model config above + the api_key_env to be set." },
     { "name": "fresh-eyes-review",   "tier": 1, "enabled": false, "script": "fresh-eyes-review",
-      "_note": "Needs model config above + the api_key_env to be set." }
+      "_note": "Needs model config above + the api_key_env to be set." },
+    { "name": "trajectory-judge",    "tier": 1, "enabled": false, "script": "trajectory-judge",
+      "_note": "Audits HOW the code was produced: the model reads the Author's exported transcript (policy.gates.trajectory-judge.transcript_file) for cheat signals — intent to game, test tampering, hardcoded expectations, forbidden channels, oversight tampering, misreporting. Needs model config + a transcript file." }
   ]
 }

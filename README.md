@@ -5,7 +5,7 @@
 <p align="center">
   <a href="#install"><img src="https://img.shields.io/badge/Claude%20Code-plugin-1b2440?style=flat-square&labelColor=10b78f" alt="Claude Code plugin"></a>
   <img src="https://img.shields.io/badge/niche-test--integrity-10b78f?style=flat-square" alt="test-integrity">
-  <img src="https://img.shields.io/badge/version-1.0.0--beta.3-7fe3cb?style=flat-square" alt="version 1.0.0-beta.3">
+  <img src="https://img.shields.io/badge/version-1.0.0--beta.4-7fe3cb?style=flat-square" alt="version 1.0.0-beta.4">
   <img src="https://img.shields.io/badge/license-MIT-10b78f?style=flat-square" alt="MIT license">
   <img src="https://img.shields.io/badge/deps-Python%203%20%2B%20Node-1b2440?style=flat-square" alt="deps">
   <img src="https://img.shields.io/badge/contract-stack--agnostic-1b2440?style=flat-square" alt="stack-agnostic contract">
@@ -93,7 +93,7 @@ Running `/fofo:sdlc` choreographs eight phases. Each has an **exit gate** — no
 | **2 · Test Authoring** | Judge · tests-first | Write the tests, tagged by requirement ID — **red**, because no code exists yet — then hash them into `TEST-LOCK.json` (`test-lock --write`) | `redgreen --expect red` |
 | **3 · Implementation** | Author · separate ctx | Write code to turn the suite green; never touch the tests | `redgreen --expect green` |
 | **4 · Verification** | Referee · Tier 0 | Run the gate runner: `trace` · `intent` · `secret-scan` · `test-lock` · `oversight-integrity` · `deps-gate` (+ opt-in `mutation`/`coverage`/`separation`/`flake`/`diff-budget`) | all hard gates pass, or escalate |
-| **5 · Fresh-Eyes Review** | Reviewer · Tier 1 | Model gates: `semantic-test-judge` + `fresh-eyes-review` (cheating / security / silent changes) | clean, or escalate |
+| **5 · Fresh-Eyes Review** | Reviewer · Tier 1 | Model gates: `semantic-test-judge` + `fresh-eyes-review` (cheating / security / silent changes) + `trajectory-judge` (audits the Author's transcript for how the code was produced) | clean, or escalate |
 | **6 · Human Escalation** | Operator · Tier 2 | Gets only the tight escalation payload — gate, route, findings — *not* raw diffs | Operator decides |
 | **7 · Integration** | — | Keep the PR small enough to review (`diff-budget`), then merge | merge |
 
@@ -137,9 +137,11 @@ Every gate — kept or bring-your-own — obeys one I/O contract (`--changed --p
 | `separation-gate` | 0 | fails if one context authored both the tests and the code for a unit | ⚙️ opt-in |
 | `flake-gate` | 0 | re-runs the suite N times; fails if the result is non-deterministic (a flaky test is an untrustworthy test) | ⚙️ opt-in |
 | `diff-budget` | 0 | caps changed lines so a PR stays small enough to actually review (Phase 7); git-diff or line-count mode | ⚙️ opt-in |
+| `eval-gate` | 0 | red/green for **nondeterministic (LLM-app) code**: runs your eval harness N trials, holds pass rate and optional mean score to a floor — one green run of a probabilistic unit proves nothing | ⚙️ opt-in |
 | `mutation` · `coverage` · `lint` | 0 | **bring your own** command, wrapped to the contract | ⚙️ opt-in |
 | `semantic-test-judge` | 1 | model judges whether each test asserts requirement *intent* vs. just touching lines | ⚙️ opt-in |
 | `fresh-eyes-review` | 1 | model scans the diff for cheating, security, silent architecture changes | ⚙️ opt-in |
+| `trajectory-judge` | 1 | model reads the **Author's exported transcript** for cheat signals (intent to game, test tampering, hardcoded expectations, forbidden channels, misreporting) — judges the *process*, the strongest counter to reward hacking in 2026 research | ⚙️ opt-in |
 
 No mutation/coverage/lint/model-proxy/language is hardcoded. Heavy and model gates are **disabled by default**, so a fresh install runs the language-agnostic gates immediately with nothing else installed.
 
@@ -191,6 +193,7 @@ Deep docs ship with the skill:
 [`SKILL.md`](./plugins/fofo/skills/sdlc/SKILL.md) ·
 [gate contract](./plugins/fofo/skills/sdlc/references/gate-contract.md) ·
 [phases & roles](./plugins/fofo/skills/sdlc/references/phases.md) ·
+[where FoFo sits in the ASDLC landscape](./plugins/fofo/skills/sdlc/references/asdlc-landscape.md) ·
 [porting to other languages](./plugins/fofo/skills/sdlc/references/porting-to-other-languages.md) ·
 [design notes](./plugins/fofo/skills/sdlc/BUILD-NOTES.md)
 

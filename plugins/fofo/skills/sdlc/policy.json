@@ -58,6 +58,20 @@
       "base_ref": "HEAD",
       "on_new": "escalate"
     },
+    "eval-gate": {
+      "eval_command": null,
+      "trials": 3,
+      "min_pass_rate": 1.0,
+      "score_regex": null,
+      "min_score": null,
+      "timeout_seconds": 600,
+      "on_fail": "fail"
+    },
+    "trajectory-judge": {
+      "transcript_file": "TRAJECTORY.md",
+      "max_chars": 24000,
+      "escalate_below": 0.6
+    },
     "semantic-test-judge": {
       "spec_file": "REQUIREMENTS.md",
       "escalate_below": 0.6

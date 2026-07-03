@@ -142,6 +142,28 @@
           },
           "additionalProperties": false
         },
+        "eval-gate": {
+          "type": "object",
+          "properties": {
+            "eval_command": { "type": ["string", "null"], "description": "Shell command that runs ONE eval trial (BYO harness)." },
+            "trials": { "type": "integer", "minimum": 1, "default": 3, "description": "How many times to run the eval command." },
+            "min_pass_rate": { "type": "number", "minimum": 0, "maximum": 1, "default": 1.0, "description": "Floor for passed/total trials." },
+            "score_regex": { "type": ["string", "null"], "description": "Regex with one float group matched against each trial's stdout (e.g. 'accuracy: ([0-9.]+)')." },
+            "min_score": { "type": ["number", "null"], "description": "Floor for the mean extracted score across trials (requires score_regex)." },
+            "timeout_seconds": { "type": "integer", "minimum": 1, "default": 600 },
+            "on_fail": { "enum": ["fail", "escalate"], "default": "fail" }
+          },
+          "additionalProperties": false
+        },
+        "trajectory-judge": {
+          "type": "object",
+          "properties": {
+            "transcript_file": { "type": "string", "default": "TRAJECTORY.md", "description": "The Author's exported working transcript." },
+            "max_chars": { "type": "integer", "minimum": 1000, "default": 24000, "description": "Transcript budget sent to the model (head+tail kept when truncating)." },
+            "escalate_below": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.6 }
+          },
+          "additionalProperties": false
+        },
         "semantic-test-judge": {
           "type": "object",
           "properties": {

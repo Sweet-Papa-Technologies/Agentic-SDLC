@@ -61,6 +61,8 @@ oversight = load_gate("oversight-integrity")
 depsgate = load_gate("deps-gate")
 specadapter = load_gate("spec-adapter")
 speclint = load_gate("spec-lint")
+evalgate = load_gate("eval-gate")
+trajectory = load_gate("trajectory-judge")
 
 
 class TestGatelib(unittest.TestCase):
@@ -315,6 +317,73 @@ class TestSpecAdapter(unittest.TestCase):
             [{"title": "Vague", "story": None, "acceptance": []}], "kiro", "r.md")
         self.assertIn("Acceptance: TODO", rendered)
         self.assertEqual(len(warnings), 1)
+
+
+class TestEvalGate(unittest.TestCase):
+    def test_all_pass_no_score_floor(self):
+        status, summary, _ = evalgate.classify([(True, None)] * 3, 1.0, None)
+        self.assertEqual(status, "pass")
+        self.assertIn("3/3", summary)
+
+    def test_pass_rate_below_floor_fails(self):
+        status, summary, problems = evalgate.classify([(True, None), (False, None)], 1.0, None)
+        self.assertEqual(status, "fail")
+        self.assertTrue(any("pass rate" in p for p in problems))
+
+    def test_partial_rate_floor_allows_flaky_evals(self):
+        status, _, _ = evalgate.classify([(True, None), (True, None), (False, None)], 0.6, None)
+        self.assertEqual(status, "pass")
+
+    def test_mean_score_below_floor_fails(self):
+        status, _, problems = evalgate.classify([(True, 0.8), (True, 0.7)], 1.0, 0.9)
+        self.assertEqual(status, "fail")
+        self.assertTrue(any("mean score" in p for p in problems))
+
+    def test_mean_score_above_floor_passes(self):
+        status, summary, _ = evalgate.classify([(True, 0.95), (True, 0.91)], 1.0, 0.9)
+        self.assertEqual(status, "pass")
+        self.assertIn("mean score", summary)
+
+    def test_min_score_with_no_scores_fails(self):
+        status, _, problems = evalgate.classify([(True, None)], 1.0, 0.9)
+        self.assertEqual(status, "fail")
+        self.assertTrue(any("no score matched" in p for p in problems))
+
+    def test_parse_score_takes_last_match(self):
+        rx = re.compile(r"accuracy: ([0-9.]+)")
+        self.assertEqual(evalgate.parse_score("accuracy: 0.5\naccuracy: 0.9\n", rx), 0.9)
+        self.assertIsNone(evalgate.parse_score("no scores here", rx))
+
+
+class TestTrajectoryJudge(unittest.TestCase):
+    def test_short_transcript_untouched(self):
+        self.assertEqual(trajectory.truncate_transcript("abc", 100), "abc")
+
+    def test_long_transcript_keeps_head_and_tail(self):
+        text = "HEAD" + ("x" * 50000) + "TAIL"
+        out = trajectory.truncate_transcript(text, 3000)
+        self.assertTrue(out.startswith("HEAD"))
+        self.assertTrue(out.endswith("TAIL"))
+        self.assertIn("truncated by trajectory-judge", out)
+        self.assertLess(len(out), 3200)
+
+    def test_high_confidence_signal_fails(self):
+        sig = [{"kind": "test-tampering", "severity": "high", "confidence": 0.9}]
+        self.assertEqual(trajectory.classify(sig, 0.9, 0.6), "fail")
+
+    def test_low_confidence_high_signal_escalates(self):
+        sig = [{"kind": "test-tampering", "severity": "high", "confidence": 0.4}]
+        self.assertEqual(trajectory.classify(sig, 0.9, 0.6), "escalate")
+
+    def test_med_signal_escalates(self):
+        sig = [{"kind": "misreporting", "severity": "med", "confidence": 0.9}]
+        self.assertEqual(trajectory.classify(sig, 0.9, 0.6), "escalate")
+
+    def test_clean_confident_passes(self):
+        self.assertEqual(trajectory.classify([], 0.9, 0.6), "pass")
+
+    def test_clean_but_unconfident_escalates(self):
+        self.assertEqual(trajectory.classify([], 0.3, 0.6), "escalate")
 
 
 class TestSpecLintEars(unittest.TestCase):

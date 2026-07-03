@@ -123,9 +123,12 @@ is *stable*, not whether it's green.)
 Exit: all hard gates pass, or escalate.
 
 **Phase 5 — Fresh-Eyes Review (Referee, Tier 1, third context).** With the model
-gates enabled, the same run continues into `semantic-test-judge` and
-`fresh-eyes-review`. Run these from a Reviewer sub-agent that has seen neither the
-Author's nor the Judge's working context.
+gates enabled, the same run continues into `semantic-test-judge`,
+`fresh-eyes-review`, and — if the Author's transcript was exported —
+`trajectory-judge`, which audits *how* the code was produced (intent to game,
+test tampering, hardcoded expectations, forbidden channels, misreporting). Run
+these from a Reviewer sub-agent that has seen neither the Author's nor the
+Judge's working context.
 Exit: clean, or escalate.
 
 **Phase 6 — Human Escalation (Operator, Tier 2).** Hand the Operator the
@@ -202,6 +205,8 @@ Every gate — kept or bring-your-own — obeys one I/O contract: invoked with
   policy.json, PROVENANCE.\*, or TEST-LOCK.json — the agent can't edit its own
   referee), `deps-gate` (a new dependency escalates for Operator sign-off),
   `separation-gate`, `flake-gate` (re-runs the suite to catch non-determinism),
+  `eval-gate` (red/green for nondeterministic code: N eval trials held to a
+  pass-rate/score floor — point it at your LLM-app eval harness),
   `diff-budget` (caps changed lines so the PR stays reviewable).
 - **Kept JS/TS reference:** `intent-gate` — real-AST analysis of test quality via a
   parser **vendored with the skill** (nothing to install), with an automatic
@@ -209,7 +214,9 @@ Every gate — kept or bring-your-own — obeys one I/O contract: invoked with
   the same contract — see
   [references/porting-to-other-languages.md](references/porting-to-other-languages.md).
 - **Kept, model-based (Tier 1, off by default):** `semantic-test-judge`,
-  `fresh-eyes-review`. They use only the endpoint configured in `gates.config`.
+  `fresh-eyes-review`, `trajectory-judge` (reads the Author's exported
+  transcript for cheat signals — judges the *process*, not just the artifact).
+  They use only the endpoint configured in `gates.config`.
 - **Bring-your-own (config, not code):** `mutation`, `coverage`, `lint`. Point
   `gates.config` at a project command. Wrap a plain pass/fail command with
   `${CLAUDE_SKILL_DIR}/scripts/adapter`.

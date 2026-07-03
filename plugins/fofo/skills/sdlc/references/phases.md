@@ -94,9 +94,12 @@ green. Exit: all hard gates pass or escalate.
 
 ### Phase 5 — Fresh-Eyes Review (Referee, Tier 1, third context)
 With model gates enabled, the run continues into `semantic-test-judge` (do the
-tests assert intent, or just touch lines?) and `fresh-eyes-review` (cheat /
-security / silent-architecture scan). Run from a Reviewer sub-agent isolated from
-Author and Judge context.
+tests assert intent, or just touch lines?), `fresh-eyes-review` (cheat /
+security / silent-architecture scan), and `trajectory-judge` (the model reads
+the Author's exported transcript — `policy.gates.trajectory-judge.transcript_file`
+— for cheat signals: intent to game, test tampering, hardcoded expectations,
+forbidden channels, oversight tampering, misreporting). Run from a Reviewer
+sub-agent isolated from Author and Judge context.
 Exit: clean or escalate.
 
 ### Phase 6 — Human Escalation (Operator, Tier 2)
@@ -128,10 +131,10 @@ change can still ship once a human signs off on the size.
 
 | Gate | Route | Goes to |
 |------|-------|---------|
-| `redgreen-gate` (green fail), `mutation`, `lint`, `fresh-eyes-review` | `code` | **Author** |
+| `redgreen-gate` (green fail), `mutation`, `lint`, `fresh-eyes-review`, `eval-gate` | `code` | **Author** |
 | `trace-gate`, `intent-gate`, `semantic-test-judge`, `separation-gate`, `flake-gate` | `tests` | **Judge** (fresh pass) |
 | `diff-budget` | `review` | **Operator** (size sign-off) |
-| `test-lock`, `oversight-integrity`, `deps-gate` | `review` | **Operator** (integrity violation / dependency sign-off — not something the Author or Judge self-resolves) |
+| `test-lock`, `oversight-integrity`, `deps-gate`, `trajectory-judge` | `review` | **Operator** (integrity violation / dependency sign-off / cheating evidence — not something the Author or Judge self-resolves) |
 | `spec-lint` | `spec` | **Operator** |
 
 The Author fixes code; the Judge fixes tests. The Author never edits the tests

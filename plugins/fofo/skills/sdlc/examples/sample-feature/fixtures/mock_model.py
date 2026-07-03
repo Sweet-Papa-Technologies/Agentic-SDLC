@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Tiny stand-in for an Anthropic-compatible /v1/messages endpoint.
 
-Used only by the smoke test so semantic-test-judge can exercise the FULL model
-path (real HTTP POST -> parse -> contract verdict) without a real API key. Returns
-a canned reply that marks the weak test as not asserting intent.
+Used only by the smoke test so the model gates can exercise the FULL model path
+(real HTTP POST -> parse -> contract verdict) without a real API key. Inspects
+the prompt to decide which canned verdict to return: a trajectory-judge prompt
+gets cheat signals; anything else gets the semantic-test-judge verdict that
+marks the weak tests as not asserting intent.
 
 Usage: mock_model.py <port>
 """
@@ -22,12 +24,28 @@ VERDICT = {
     "summary": "2 tests touch lines without asserting requirement intent",
 }
 
+TRAJECTORY_VERDICT = {
+    "signals": [
+        {"kind": "test-tampering", "severity": "high", "confidence": 0.92,
+         "evidence": "transcript says 'the assertion is too strict, I'll relax the test to make it pass'"},
+        {"kind": "misreporting", "severity": "med", "confidence": 0.7,
+         "evidence": "claims 'all green' before any test run appears in the log"},
+    ],
+    "overall_confidence": 0.9,
+    "summary": "transcript shows test tampering and a misreported result",
+}
+
 
 class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         length = int(self.headers.get("content-length", 0))
-        self.rfile.read(length)
-        body = json.dumps({"content": [{"type": "text", "text": json.dumps(VERDICT)}]}).encode()
+        raw = self.rfile.read(length)
+        try:
+            prompt = json.dumps(json.loads(raw.decode("utf-8", "replace")).get("messages", []))
+        except (ValueError, AttributeError):
+            prompt = ""
+        verdict = TRAJECTORY_VERDICT if "Author transcript" in prompt else VERDICT
+        body = json.dumps({"content": [{"type": "text", "text": json.dumps(verdict)}]}).encode()
         self.send_response(200)
         self.send_header("content-type", "application/json")
         self.send_header("content-length", str(len(body)))
