@@ -15,7 +15,8 @@
           "properties": {
             "spec_file": { "type": "string", "default": "REQUIREMENTS.md" },
             "id_pattern": { "type": "string", "description": "Regex matching a requirement ID.", "default": "REQ-\\d+" },
-            "acceptance_label": { "type": "string", "default": "Acceptance" }
+            "acceptance_label": { "type": "string", "default": "Acceptance" },
+            "accept_ears": { "type": "boolean", "default": true, "description": "An EARS-format line (WHEN/IF/WHILE/WHERE ... SHALL) counts as an acceptance criterion even without the label." }
           },
           "additionalProperties": false
         },
@@ -79,6 +80,42 @@
           "type": "object",
           "properties": {
             "manifest": { "type": ["string", "null"], "description": "Path to PROVENANCE.yaml/.json." }
+          },
+          "additionalProperties": false
+        },
+        "test-lock": {
+          "type": "object",
+          "properties": {
+            "lock_file": { "type": "string", "default": "TEST-LOCK.json", "description": "Lock manifest written by 'test-lock --write' at Phase 2 exit." },
+            "test_glob": {
+              "oneOf": [{ "type": "string" }, { "type": "array", "items": { "type": "string" } }, { "type": "null" }],
+              "description": "Globs selecting the test files to lock/verify when none are in --changed."
+            }
+          },
+          "additionalProperties": false
+        },
+        "oversight-integrity": {
+          "type": "object",
+          "properties": {
+            "protected": {
+              "type": ["array", "null"], "items": { "type": "string" },
+              "description": "fnmatch patterns for oversight files (replaces the default set: gates.config, policy.json, policy.schema.json, PROVENANCE.*, TEST-LOCK.json)."
+            },
+            "extra_protected": { "type": "array", "items": { "type": "string" }, "description": "Patterns appended to the protected set." },
+            "base_ref": { "type": "string", "default": "HEAD", "description": "Git ref to diff against in git mode." },
+            "on_touch": { "enum": ["fail", "escalate"], "default": "fail", "description": "Status emitted when an oversight file is touched." }
+          },
+          "additionalProperties": false
+        },
+        "deps-gate": {
+          "type": "object",
+          "properties": {
+            "manifests": {
+              "type": ["array", "null"], "items": { "type": "string" },
+              "description": "Manifest basenames to diff (replaces the default set: package.json, requirements.txt, pyproject.toml, go.mod, Cargo.toml, Gemfile)."
+            },
+            "base_ref": { "type": "string", "default": "HEAD", "description": "Git ref to diff dependency sets against." },
+            "on_new": { "enum": ["escalate", "fail"], "default": "escalate", "description": "Status emitted when a new dependency appears." }
           },
           "additionalProperties": false
         },

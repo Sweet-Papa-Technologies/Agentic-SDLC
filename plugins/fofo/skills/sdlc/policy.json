@@ -5,7 +5,8 @@
     "spec-lint": {
       "spec_file": "REQUIREMENTS.md",
       "id_pattern": "REQ-\\d+",
-      "acceptance_label": "Acceptance"
+      "acceptance_label": "Acceptance",
+      "accept_ears": true
     },
     "trace-gate": {
       "spec_file": "REQUIREMENTS.md",
@@ -41,6 +42,21 @@
     },
     "separation-gate": {
       "manifest": null
+    },
+    "test-lock": {
+      "lock_file": "TEST-LOCK.json",
+      "test_glob": null
+    },
+    "oversight-integrity": {
+      "protected": null,
+      "extra_protected": [],
+      "base_ref": "HEAD",
+      "on_touch": "fail"
+    },
+    "deps-gate": {
+      "manifests": null,
+      "base_ref": "HEAD",
+      "on_new": "escalate"
     },
     "semantic-test-judge": {
       "spec_file": "REQUIREMENTS.md",

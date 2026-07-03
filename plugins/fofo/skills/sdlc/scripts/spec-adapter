@@ -1,0 +1,159 @@
+#!/usr/bin/env python3
+"""
+spec-adapter — import a spec written for another SDD tool into FoFo's
+REQUIREMENTS.md (Phase 0 input).
+
+FoFo is a verification layer under whatever spec workflow you already use. This
+converter is the docking point: point it at a spec authored in another tool's
+format and it emits a REQUIREMENTS.md with stable REQ-### IDs and `Acceptance:`
+criteria — exactly what spec-lint, trace-gate, and the Judge consume.
+
+Formats understood (--from auto detects):
+  kiro       Kiro requirements.md — "### Requirement N" blocks with a
+             "**User Story:**" line and numbered EARS acceptance criteria
+             (WHEN/IF ... THEN ... SHALL ...).
+  spec-kit   GitHub Spec Kit spec.md — functional-requirement bullets like
+             "- **FR-001**: System MUST ...".
+  bmad       BMAD-METHOD PRD — requirement lines like "FR1: ..." / "NFR2: ...".
+
+Not a gate: a one-shot converter with a plain exit code (0 converted, 1 error).
+
+Usage:
+    spec-adapter --input path/to/spec.md [--from auto|kiro|spec-kit|bmad]
+                 [--output REQUIREMENTS.md] [--force]
+"""
+import argparse
+import os
+import re
+import sys
+
+EARS_RE = re.compile(r"(?i)\b(when|if|while|where)\b[^\n]*\bshall\b")
+
+
+def detect_format(text):
+    if re.search(r"(?m)^#{2,4}[ \t]*Requirement[ \t]+\d+", text) and EARS_RE.search(text):
+        return "kiro"
+    if re.search(r"\*\*FR-\d+\*\*|\bFR-\d{2,}\b", text):
+        return "spec-kit"
+    if re.search(r"(?m)^\s*[-*]?\s*\**(FR|NFR)\d+\**\s*[:.]", text):
+        return "bmad"
+    return None
+
+
+def convert_kiro(text):
+    """-> list of {title, story, acceptance[]} from Kiro requirements.md."""
+    reqs = []
+    # [ \t]* (not \s*) after the number: \s would eat newlines and swallow the next line.
+    heads = list(re.finditer(r"(?m)^#{2,4}[ \t]*Requirement[ \t]+(\d+)[ \t]*:?[ \t]*(.*)$", text))
+    for i, m in enumerate(heads):
+        end = heads[i + 1].start() if i + 1 < len(heads) else len(text)
+        block = text[m.start():end]
+        story = None
+        sm = re.search(r"(?m)^\**User Story:?\**\s*(.+)$", block)
+        if sm:
+            story = sm.group(1).strip()
+        acceptance = []
+        for line in block.splitlines():
+            stripped = re.sub(r"^\s*(?:\d+[.)]|[-*])\s*", "", line.strip())
+            if stripped != line.strip() and EARS_RE.search(stripped):
+                acceptance.append(stripped)
+        title = m.group(2).strip()
+        if not title and story:
+            want = re.search(r"(?i)\bI want\b\s*(.+?)(?:,\s*so that\b|$)", story)
+            title = (want.group(1) if want else story).strip().rstrip(".")
+        if not title:
+            title = "Requirement %s" % m.group(1)
+        reqs.append({"title": title, "story": story, "acceptance": acceptance})
+    return reqs
+
+
+def convert_spec_kit(text):
+    """-> requirements from Spec Kit functional-requirement bullets."""
+    reqs = []
+    for m in re.finditer(r"(?m)^\s*[-*]\s*\**FR-?(\d+)\**\s*[:.]\s*(.+)$", text):
+        body = m.group(2).strip().rstrip("*").strip()
+        reqs.append({"title": body, "story": None, "acceptance": [body],
+                     "source": "FR-%s" % m.group(1).zfill(3)})
+    return reqs
+
+
+def convert_bmad(text):
+    """-> requirements from BMAD PRD FR#/NFR# lines."""
+    reqs = []
+    for m in re.finditer(r"(?m)^\s*[-*]?\s*\**((?:FR|NFR)\d+)\**\s*[:.]\s*(.+)$", text):
+        body = m.group(2).strip().rstrip("*").strip()
+        reqs.append({"title": body, "story": None, "acceptance": [body],
+                     "source": m.group(1)})
+    return reqs
+
+
+CONVERTERS = {"kiro": convert_kiro, "spec-kit": convert_spec_kit, "bmad": convert_bmad}
+
+
+def render(reqs, fmt, source_name):
+    """Render requirement dicts to a REQUIREMENTS.md that passes spec-lint."""
+    out = ["# Requirements", "",
+           "_Converted from %s source `%s` by fofo spec-adapter. Review before Phase 0 sign-off._" % (fmt, source_name),
+           ""]
+    warnings = []
+    for i, r in enumerate(reqs, 1):
+        rid = "REQ-%03d" % i
+        title = re.sub(r"\s+", " ", r["title"]).strip()
+        if len(title) > 100:
+            title = title[:97].rstrip() + "..."
+        out.append("### %s: %s" % (rid, title))
+        if r.get("source"):
+            out.append("Source: %s" % r["source"])
+        if r.get("story"):
+            out.append(r["story"])
+        if r["acceptance"]:
+            for a in r["acceptance"]:
+                out.append("Acceptance: %s" % a)
+        else:
+            out.append("Acceptance: TODO — source had no verifiable criterion; the Operator must supply one.")
+            warnings.append("%s (%s) had no acceptance criterion in the source" % (rid, title))
+        out.append("")
+    return "\n".join(out).rstrip() + "\n", warnings
+
+
+def main():
+    p = argparse.ArgumentParser(description="Convert a Spec Kit / Kiro / BMAD spec into FoFo REQUIREMENTS.md.")
+    p.add_argument("--input", required=True, help="Source spec file.")
+    p.add_argument("--from", dest="fmt", default="auto", choices=["auto", "kiro", "spec-kit", "bmad"])
+    p.add_argument("--output", default="REQUIREMENTS.md")
+    p.add_argument("--force", action="store_true", help="Overwrite an existing output file.")
+    args = p.parse_args()
+
+    if not os.path.isfile(args.input):
+        sys.stderr.write("spec-adapter: input not found: %s\n" % args.input)
+        return 1
+    with open(args.input, "r", encoding="utf-8", errors="replace") as fh:
+        text = fh.read()
+
+    fmt = args.fmt if args.fmt != "auto" else detect_format(text)
+    if not fmt:
+        sys.stderr.write("spec-adapter: could not detect the source format — looked for Kiro "
+                         "'### Requirement N' + EARS criteria, Spec Kit '**FR-###**' bullets, "
+                         "or BMAD 'FR#/NFR#:' lines. Pass --from explicitly.\n")
+        return 1
+
+    reqs = CONVERTERS[fmt](text)
+    if not reqs:
+        sys.stderr.write("spec-adapter: no requirements recognized in %s as %s format.\n" % (args.input, fmt))
+        return 1
+
+    if os.path.exists(args.output) and not args.force:
+        sys.stderr.write("spec-adapter: %s already exists — pass --force to overwrite.\n" % args.output)
+        return 1
+
+    rendered, warnings = render(reqs, fmt, os.path.basename(args.input))
+    with open(args.output, "w", encoding="utf-8") as fh:
+        fh.write(rendered)
+    sys.stderr.write("spec-adapter: converted %d requirement(s) from %s format -> %s\n" % (len(reqs), fmt, args.output))
+    for w in warnings:
+        sys.stderr.write("spec-adapter: WARNING: %s\n" % w)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

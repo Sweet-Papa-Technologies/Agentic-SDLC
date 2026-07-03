@@ -1,0 +1,153 @@
+#!/usr/bin/env python3
+"""
+test-lock — tamper evidence for the Judge's tests (language-agnostic).
+
+The loop's central promise — "the Author never edits the tests that grade it" —
+is procedural until something checks it. This gate makes it a checked fact:
+
+  Phase 2 exit (Judge/orchestrator):  test-lock --write   locks the test files'
+      sha256 hashes into TEST-LOCK.json.
+  Phase 4 (Referee):                  test-lock           verifies every locked
+      file is byte-identical. A modified or deleted locked test is a hard FAIL;
+      a new test file that appeared after the lock is an ESCALATION (it may be a
+      legitimate Judge addition — the Judge re-runs --write — but the Operator
+      decides).
+
+No lock file -> skip (tamper evidence not enforced), so a fresh install is
+unaffected until the loop opts in. Deterministic, no network, stdlib only.
+
+Contract: see references/gate-contract.md
+Config keys (policy.gates.test-lock):
+  lock_file   lock manifest path                    (default "TEST-LOCK.json")
+  test_glob   globs selecting the test files        (default sensible test globs)
+"""
+import hashlib
+import json
+import os
+import re
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import gatelib  # noqa: E402
+
+GATE, TIER = "test-lock", 0
+DEFAULT_TEST_GLOBS = [
+    "**/*test*.*", "**/*spec*.*", "**/test_*.*", "**/*_test.*",
+    "test/**/*", "tests/**/*", "spec/**/*", "__tests__/**/*",
+]
+
+
+def hash_file(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def rel_key(path, root):
+    """Normalize a file path to the lock's key form: relative, forward slashes."""
+    return os.path.relpath(os.path.normpath(path), os.path.normpath(root)).replace(os.sep, "/")
+
+
+def compute_hashes(files, root):
+    """Map rel-path -> sha256 for existing files. Pure-ish: unit-testable on a temp dir."""
+    return {rel_key(f, root): hash_file(f) for f in files if os.path.isfile(f)}
+
+
+def compare_lock(locked, current):
+    """Diff a lock manifest against freshly computed hashes.
+
+    Returns (modified, missing, new) — each a sorted list of rel paths.
+    """
+    modified = sorted(k for k in locked if k in current and current[k] != locked[k])
+    missing = sorted(k for k in locked if k not in current)
+    new = sorted(k for k in current if k not in locked)
+    return modified, missing, new
+
+
+def select_test_files(args, opts, root):
+    """Same selection logic as trace-gate: test-ish files from --changed, else globs."""
+    changed = gatelib.expand_changed(args.changed, root)
+    files = [f for f in changed if re.search(r"(test|spec|__tests__)", f, re.IGNORECASE)]
+    if not files:
+        globs = opts.get("test_glob") or DEFAULT_TEST_GLOBS
+        if isinstance(globs, str):
+            globs = [globs]
+        files = gatelib.expand_changed(globs, root)
+    return sorted(files)
+
+
+def main():
+    write_mode = "--write" in sys.argv
+    _p, args = gatelib.parse_args([a for a in sys.argv[1:] if a != "--write"])
+    policy = gatelib.load_policy(args)
+    opts = gatelib.gate_options(policy, GATE)
+    root = args.context or "."
+
+    lock_file = opts.get("lock_file", "TEST-LOCK.json")
+    lock_path = lock_file if os.path.isabs(lock_file) else os.path.join(root, lock_file)
+
+    files = select_test_files(args, opts, root)
+
+    if write_mode:
+        if not files:
+            gatelib.emit(GATE, TIER, "fail",
+                         "test-lock --write found no test files to lock",
+                         [gatelib.finding("high", lock_file,
+                          "Pass the Judge's test files via --changed (or set policy.gates.test-lock.test_glob).")])
+        hashes = compute_hashes(files, root)
+        with open(lock_path, "w", encoding="utf-8") as fh:
+            json.dump({"algo": "sha256", "files": hashes}, fh, indent=2, sort_keys=True)
+            fh.write("\n")
+        gatelib.emit(GATE, TIER, "pass",
+                     "locked %d test file(s) into %s" % (len(hashes), lock_file),
+                     confidence=1.0)
+
+    if not os.path.isfile(lock_path):
+        gatelib.emit(GATE, TIER, "skip",
+                     "no %s — tamper evidence not enforced (run test-lock --write at Phase 2 exit)" % lock_file)
+
+    lock = gatelib.load_json(lock_path, default={}) or {}
+    locked = lock.get("files", {})
+    if not locked:
+        gatelib.emit(GATE, TIER, "skip", "%s locks no files" % lock_file)
+
+    current = compute_hashes(files, root)
+    # A locked file must be verifiable even if the caller's --changed missed it.
+    for key in locked:
+        if key not in current:
+            full = os.path.join(root, key)
+            if os.path.isfile(full):
+                current[key] = hash_file(full)
+    modified, missing, new = compare_lock(locked, current)
+
+    findings = []
+    for f in modified:
+        findings.append(gatelib.finding("high", f,
+                        "Locked test file '%s' was modified after the Judge locked it (Phase 2)." % f))
+    for f in missing:
+        findings.append(gatelib.finding("high", f,
+                        "Locked test file '%s' was deleted after the Judge locked it (Phase 2)." % f))
+    for f in new:
+        findings.append(gatelib.finding("med", f,
+                        "Test file '%s' appeared after the lock. If the Judge added it, re-run test-lock --write; otherwise it was not authored under separation." % f))
+
+    if modified or missing:
+        gatelib.emit(GATE, TIER, "fail",
+                     "%d locked test file(s) tampered with since Phase 2" % (len(modified) + len(missing)),
+                     findings, confidence=1.0)
+    if new:
+        gatelib.emit(GATE, TIER, "escalate",
+                     "%d unlocked test file(s) appeared after the lock" % len(new),
+                     findings, confidence=0.9)
+    gatelib.emit(GATE, TIER, "pass",
+                 "%d locked test file(s) unchanged since Phase 2" % len(locked),
+                 confidence=1.0)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as exc:  # noqa: BLE001
+        gatelib.fail_internal(GATE, TIER, exc)

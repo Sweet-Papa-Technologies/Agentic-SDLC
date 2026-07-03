@@ -5,7 +5,7 @@
 <p align="center">
   <a href="#install"><img src="https://img.shields.io/badge/Claude%20Code-plugin-1b2440?style=flat-square&labelColor=10b78f" alt="Claude Code plugin"></a>
   <img src="https://img.shields.io/badge/niche-test--integrity-10b78f?style=flat-square" alt="test-integrity">
-  <img src="https://img.shields.io/badge/version-1.0.0--beta.2-7fe3cb?style=flat-square" alt="version 1.0.0-beta.2">
+  <img src="https://img.shields.io/badge/version-1.0.0--beta.3-7fe3cb?style=flat-square" alt="version 1.0.0-beta.3">
   <img src="https://img.shields.io/badge/license-MIT-10b78f?style=flat-square" alt="MIT license">
   <img src="https://img.shields.io/badge/deps-Python%203%20%2B%20Node-1b2440?style=flat-square" alt="deps">
   <img src="https://img.shields.io/badge/contract-stack--agnostic-1b2440?style=flat-square" alt="stack-agnostic contract">
@@ -50,6 +50,8 @@ If you know **[TDD-Guard](https://github.com/nizos/tdd-guard)** — the closest 
 
 **Mutation testing is complementary, not competing.** "Tests that pass" ≠ "tests that catch" — mutation testing is the gold standard for the latter. FoFo treats `mutation` (and `coverage`, `lint`) as **bring-your-own gates wrapped to the same contract**: point it at your mutation tool and it runs in the same pipeline and routes failures the same way. FoFo absorbs that approach rather than replacing it.
 
+**Spec-driven development tools (Spec Kit, Kiro, BMAD, AI-DLC) are upstream, not rivals.** They own *specify → plan → tasks*; none of them enforces test integrity. FoFo docks underneath whichever one you use: `scripts/spec-adapter` converts a Spec Kit `spec.md` (FR-### bullets), a Kiro `requirements.md` (EARS criteria), or a BMAD PRD (FR#/NFR# lines) into the `REQUIREMENTS.md` the loop consumes, and `spec-lint` accepts EARS-format criteria (`WHEN … THEN the system SHALL …`) natively. Author the spec wherever you like; verify it here.
+
 ## Install
 
 In [Claude Code](https://code.claude.com):
@@ -88,9 +90,9 @@ Running `/fofo:sdlc` choreographs eight phases. Each has an **exit gate** — no
 |:------|:-----|:-------------|:----------|
 | **0 · Spec & Design** | Operator | Each requirement gets a stable ID + acceptance criteria (`REQUIREMENTS.md`) | `spec-lint` |
 | **1 · Test Requirements** | Judge · spec-only | Map every requirement → test intents (`TEST-REQS.yaml`) | `trace-gate` |
-| **2 · Test Authoring** | Judge · tests-first | Write the tests, tagged by requirement ID — **red**, because no code exists yet | `redgreen --expect red` |
+| **2 · Test Authoring** | Judge · tests-first | Write the tests, tagged by requirement ID — **red**, because no code exists yet — then hash them into `TEST-LOCK.json` (`test-lock --write`) | `redgreen --expect red` |
 | **3 · Implementation** | Author · separate ctx | Write code to turn the suite green; never touch the tests | `redgreen --expect green` |
-| **4 · Verification** | Referee · Tier 0 | Run the gate runner: `trace` · `intent` · `secret-scan` (+ opt-in `mutation`/`coverage`/`separation`/`flake`/`diff-budget`) | all hard gates pass, or escalate |
+| **4 · Verification** | Referee · Tier 0 | Run the gate runner: `trace` · `intent` · `secret-scan` · `test-lock` · `oversight-integrity` · `deps-gate` (+ opt-in `mutation`/`coverage`/`separation`/`flake`/`diff-budget`) | all hard gates pass, or escalate |
 | **5 · Fresh-Eyes Review** | Reviewer · Tier 1 | Model gates: `semantic-test-judge` + `fresh-eyes-review` (cheating / security / silent changes) | clean, or escalate |
 | **6 · Human Escalation** | Operator · Tier 2 | Gets only the tight escalation payload — gate, route, findings — *not* raw diffs | Operator decides |
 | **7 · Integration** | — | Keep the PR small enough to review (`diff-budget`), then merge | merge |
@@ -129,6 +131,9 @@ Every gate — kept or bring-your-own — obeys one I/O contract (`--changed --p
 | `redgreen-gate` | 0 | suite is red before code, green after | ✅ on |
 | `intent-gate` | 0 | catches assertion-free / trivially-true / snapshot-only / banned-mock tests — depth varies by language (see [below](#guarantees--limits)) | ✅ on |
 | `secret-scan` | 0 | deterministic hard-coded-secret detector (AWS keys, PEM private keys hard-fail; secret-looking assignments escalate) — key-free, no network | ✅ on |
+| `test-lock` | 0 | tamper evidence: the Judge hashes the tests at Phase 2 exit (`--write` → `TEST-LOCK.json`); a locked test modified or deleted afterward hard-fails, a new unlocked test escalates | ✅ on |
+| `oversight-integrity` | 0 | the diff must not touch the referee's own machinery (`gates.config`, `policy.json`, `PROVENANCE.*`, `TEST-LOCK.json`) — agents sabotaging their own oversight is a documented failure mode | ✅ on |
+| `deps-gate` | 0 | a new dependency in any manifest (`package.json`, `requirements.txt`, `pyproject.toml`, `go.mod`, `Cargo.toml`, `Gemfile`) escalates for Operator sign-off — supply-chain surface no test will catch | ✅ on |
 | `separation-gate` | 0 | fails if one context authored both the tests and the code for a unit | ⚙️ opt-in |
 | `flake-gate` | 0 | re-runs the suite N times; fails if the result is non-deterministic (a flaky test is an untrustworthy test) | ⚙️ opt-in |
 | `diff-budget` | 0 | caps changed lines so a PR stays small enough to actually review (Phase 7); git-diff or line-count mode | ⚙️ opt-in |
@@ -215,9 +220,10 @@ Bump `version` in `plugins/fofo/.claude-plugin/plugin.json` and the matching ent
 **Beta.** The engine is sound and every suite passes end to end (`selftest` + both smokes, gated in CI and a pre-push hook); the label invites real-world use before a stable 1.0.
 
 What it does **today**:
-- A test-first loop with **separated** test-author and code-author contexts (hard isolation on Claude Code subagents).
-- Deterministic Tier-0 gates on every change (`spec-lint`, `trace-gate`, `redgreen-gate`, `intent-gate`, `secret-scan`); opt-in `separation`, `flake`, `diff-budget`, and model-based Tier-1 review.
+- A test-first loop with **separated** test-author and code-author contexts (hard isolation on Claude Code subagents), plus **tamper evidence**: the Judge's tests are hash-locked at Phase 2 (`test-lock`) and the referee's own config is protected from the diff (`oversight-integrity`).
+- Deterministic Tier-0 gates on every change (`spec-lint`, `trace-gate`, `redgreen-gate`, `intent-gate`, `secret-scan`, `test-lock`, `oversight-integrity`, `deps-gate`); opt-in `separation`, `flake`, `diff-budget`, and model-based Tier-1 review.
 - **One gate contract**, so any tool — mutation, coverage, lint — drops in and routes failures the same way.
+- **Spec interop**: import Spec Kit / Kiro / BMAD specs via `spec-adapter`; `spec-lint` reads EARS criteria natively.
 
 What it deliberately **doesn't** do yet — and where your ideas come in:
 - It's a **library of gates + a procedure**, not a hosted service: CI integration is one example GitHub Action, not a turnkey app.

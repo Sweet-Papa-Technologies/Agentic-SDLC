@@ -10,11 +10,16 @@ Config keys (policy.gates.spec-lint):
   spec_file        path to the requirements doc          (default "REQUIREMENTS.md")
   id_pattern       regex matching a requirement ID        (default "REQ-\\d+")
   acceptance_label label that introduces acceptance text  (default "Acceptance")
+  accept_ears      EARS-format lines count as acceptance  (default true)
 
 Convention recognised by default:
     ### REQ-001: Title
     Acceptance: <criterion>            # or a "- Acceptance:" bullet, or an
                                        #   "Acceptance Criteria" sub-list below.
+
+With accept_ears, an EARS-format criterion (the convention Kiro and other SDD
+tools emit: "WHEN <trigger> THEN the system SHALL <response>") also satisfies
+the requirement even without the "Acceptance:" label.
 """
 import os
 import re
@@ -24,6 +29,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gatelib  # noqa: E402
 
 GATE, TIER = "spec-lint", 0
+
+# EARS (Easy Approach to Requirements Syntax): a keyword'd trigger + a SHALL
+# response on one line. Requiring SHALL keeps ordinary "if ... must" prose from
+# counting as a criterion.
+EARS_RE = re.compile(r"(?i)\b(when|if|while|where)\b[^\n]*\bshall\b")
 
 
 def main():
@@ -59,6 +69,7 @@ def main():
                      [gatelib.finding("high", spec_file, "Expected requirement IDs matching /%s/." % id_re.pattern)])
 
     acc_re = re.compile(r"\b" + re.escape(acc_label), re.IGNORECASE)
+    accept_ears = bool(opts.get("accept_ears", True))
     seen = {}
     for idx, (rid, start) in enumerate(blocks):
         end = blocks[idx + 1][1] if idx + 1 < len(blocks) else len(lines)
@@ -68,8 +79,8 @@ def main():
             findings.append(gatelib.finding("med", loc, "Duplicate requirement ID '%s' (first at line %d)." % (rid, seen[rid])))
         else:
             seen[rid] = start + 1
-        if not acc_re.search(body):
-            findings.append(gatelib.finding("high", loc, "Requirement '%s' has no '%s' criterion." % (rid, acc_label)))
+        if not acc_re.search(body) and not (accept_ears and EARS_RE.search(body)):
+            findings.append(gatelib.finding("high", loc, "Requirement '%s' has no '%s' criterion (and no EARS-format criterion)." % (rid, acc_label)))
 
     high = [f for f in findings if f["severity"] == "high"]
     if high:

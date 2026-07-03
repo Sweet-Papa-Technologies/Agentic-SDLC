@@ -1,0 +1,224 @@
+#!/usr/bin/env python3
+"""
+deps-gate — new dependencies need a human eye (language-agnostic).
+
+An agent can silently widen the supply-chain surface by adding a package —
+something no test will ever catch. This gate diffs the dependency manifests
+against the git base ref and ESCALATES when a new dependency name appears
+(escalate, not fail: a new dep is often right, but it's the Operator's call,
+not the Author's).
+
+Manifests understood (name-level diff, format-specific parsing):
+  package.json           dependencies / devDependencies / peerDependencies / optionalDependencies
+  requirements.txt       one requirement per line
+  pyproject.toml         [project] dependencies arrays + [tool.poetry.dependencies] tables
+  go.mod                 require lines/blocks
+  Cargo.toml             [dependencies] / [dev-dependencies] / [build-dependencies]
+  Gemfile                gem "name"
+
+No git repo or no manifests -> skip. Deterministic, no network, stdlib only.
+
+Contract: see references/gate-contract.md
+Config keys (policy.gates.deps-gate):
+  manifests   basenames to treat as manifests (replaces the default set)
+  base_ref    git ref to diff against          (default "HEAD")
+  on_new      "escalate" | "fail"              (default "escalate")
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import gatelib  # noqa: E402
+
+GATE, TIER = "deps-gate", 0
+DEFAULT_MANIFESTS = ["package.json", "requirements.txt", "pyproject.toml",
+                     "go.mod", "Cargo.toml", "Gemfile"]
+
+
+def parse_package_json(text):
+    try:
+        data = json.loads(text)
+    except (ValueError, TypeError):
+        return set()
+    deps = set()
+    for key in ("dependencies", "devDependencies", "peerDependencies", "optionalDependencies"):
+        deps |= set((data.get(key) or {}).keys())
+    return deps
+
+
+def parse_requirements_txt(text):
+    deps = set()
+    for line in text.splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line or line.startswith("-"):  # options like -r/-e/--hash
+            continue
+        name = re.split(r"[<>=!~;\[\s]", line, 1)[0].strip()
+        if name:
+            deps.add(name.lower())
+    return deps
+
+
+def parse_pyproject_toml(text):
+    """Heuristic, stdlib-only: strings in dependencies arrays + poetry dep tables."""
+    deps = set()
+    # arrays: dependencies = ["requests>=2", ...] (also optional-dependencies groups)
+    for arr in re.findall(r'dependencies\s*=\s*\[(.*?)\]', text, re.DOTALL):
+        for lit in re.findall(r'["\']([^"\']+)["\']', arr):
+            name = re.split(r"[<>=!~;\[\s]", lit.strip(), 1)[0].strip()
+            if name:
+                deps.add(name.lower())
+    # poetry tables: [tool.poetry.dependencies] / dev-dependencies / group.*.dependencies
+    section = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        m = re.match(r"\[([^\]]+)\]", stripped)
+        if m:
+            section = m.group(1).strip()
+            continue
+        if section and re.match(r"tool\.poetry\.(group\.[\w-]+\.)?(dev-)?dependencies$", section):
+            m = re.match(r'([\w.-]+)\s*=', stripped)
+            if m and m.group(1).lower() != "python":
+                deps.add(m.group(1).lower())
+    return deps
+
+
+def parse_go_mod(text):
+    deps = set()
+    in_block = False
+    for line in text.splitlines():
+        stripped = line.split("//", 1)[0].strip()
+        if not stripped:
+            continue
+        if stripped.startswith("require ("):
+            in_block = True
+            continue
+        if in_block and stripped == ")":
+            in_block = False
+            continue
+        m = None
+        if in_block:
+            m = re.match(r"([\w./-]+)\s+v[\w.+-]+", stripped)
+        elif stripped.startswith("require "):
+            m = re.match(r"require\s+([\w./-]+)\s+v[\w.+-]+", stripped)
+        if m:
+            deps.add(m.group(1))
+    return deps
+
+
+def parse_cargo_toml(text):
+    deps = set()
+    section = None
+    for line in text.splitlines():
+        stripped = line.split("#", 1)[0].strip()
+        m = re.match(r"\[([^\]]+)\]", stripped)
+        if m:
+            section = m.group(1).strip()
+            continue
+        if section and re.match(r"(workspace\.)?(dependencies|dev-dependencies|build-dependencies)(\.|$)", section):
+            m = re.match(r'([\w-]+)\s*=', stripped)
+            if m:
+                deps.add(m.group(1).lower())
+    return deps
+
+
+def parse_gemfile(text):
+    return set(m.group(1) for m in re.finditer(r'^\s*gem\s+["\']([^"\']+)["\']', text, re.MULTILINE))
+
+
+PARSERS = {
+    "package.json": parse_package_json,
+    "requirements.txt": parse_requirements_txt,
+    "pyproject.toml": parse_pyproject_toml,
+    "go.mod": parse_go_mod,
+    "Cargo.toml": parse_cargo_toml,
+    "Gemfile": parse_gemfile,
+}
+
+
+def git_show(root, base_ref, relpath):
+    """File content at base_ref, or None if it didn't exist there (or no git)."""
+    try:
+        proc = subprocess.run(["git", "show", "%s:%s" % (base_ref, relpath.replace(os.sep, "/"))],
+                              cwd=root, capture_output=True, text=True)
+    except (OSError, FileNotFoundError):
+        return None
+    return proc.stdout if proc.returncode == 0 else None
+
+
+def is_git_repo(root):
+    try:
+        proc = subprocess.run(["git", "rev-parse", "--is-inside-work-tree"],
+                              cwd=root, capture_output=True, text=True)
+        return proc.returncode == 0 and proc.stdout.strip() == "true"
+    except (OSError, FileNotFoundError):
+        return False
+
+
+def candidate_manifests(args, root, names):
+    """Manifests among --changed files, plus any at the context root."""
+    found = {}
+    for f in gatelib.expand_changed(args.changed, root):
+        if os.path.basename(f) in names:
+            found[os.path.relpath(f, root)] = f
+    for n in names:
+        full = os.path.join(root, n)
+        if os.path.isfile(full):
+            found.setdefault(n, full)
+    return found
+
+
+def main():
+    _p, args = gatelib.parse_args()
+    policy = gatelib.load_policy(args)
+    opts = gatelib.gate_options(policy, GATE)
+    root = args.context or "."
+
+    names = set(opts.get("manifests") or DEFAULT_MANIFESTS)
+    base_ref = opts.get("base_ref", "HEAD")
+    on_new = opts.get("on_new", "escalate")
+    if on_new not in ("escalate", "fail"):
+        on_new = "escalate"
+
+    if not is_git_repo(root):
+        gatelib.emit(GATE, TIER, "skip", "not a git work tree — no base to diff dependencies against")
+
+    manifests = candidate_manifests(args, root, names)
+    if not manifests:
+        gatelib.emit(GATE, TIER, "skip", "no dependency manifests found")
+
+    findings, checked = [], 0
+    for rel in sorted(manifests):
+        parser = PARSERS.get(os.path.basename(rel))
+        if not parser:
+            continue
+        checked += 1
+        new_deps = parser(gatelib.read_text(manifests[rel]))
+        old_text = git_show(root, base_ref, rel)
+        if old_text is None:
+            if new_deps:
+                findings.append(gatelib.finding("med", rel,
+                                "Manifest '%s' is new vs %s and declares %d dependenc(ies): %s." % (
+                                    rel, base_ref, len(new_deps), ", ".join(sorted(new_deps)))))
+            continue
+        added = sorted(new_deps - parser(old_text))
+        for dep in added:
+            findings.append(gatelib.finding("med", rel,
+                            "New dependency '%s' added in %s — new supply-chain surface; needs Operator sign-off." % (dep, rel)))
+
+    if findings:
+        gatelib.emit(GATE, TIER, on_new,
+                     "%d new dependenc(ies) vs %s across %d manifest(s)" % (len(findings), base_ref, checked),
+                     findings, confidence=1.0)
+    gatelib.emit(GATE, TIER, "pass",
+                 "%d manifest(s) checked vs %s, no new dependencies" % (checked, base_ref),
+                 confidence=1.0)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as exc:  # noqa: BLE001
+        gatelib.fail_internal(GATE, TIER, exc)

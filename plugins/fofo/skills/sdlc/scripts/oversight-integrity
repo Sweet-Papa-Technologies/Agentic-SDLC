@@ -1,0 +1,115 @@
+#!/usr/bin/env python3
+"""
+oversight-integrity — the referee protects its own machinery (language-agnostic).
+
+A documented failure mode of coding agents is sabotaging the thing that grades
+them: editing the gate config, relaxing the policy thresholds, rewriting the
+provenance manifest, or regenerating the test lock. This gate fails the run if
+the diff touches any of those oversight files. Only the Operator changes the
+rules — and they do it deliberately, in their own commit, not inside an
+implementation diff.
+
+Detection, auto-selected:
+  - git mode  : `git diff --name-only <base_ref>` (work tree vs base, staged and
+                unstaged) matched against the protected patterns.
+  - lines mode: the --changed list matched against the protected patterns.
+                Fallback when there is no git repo.
+
+Touched -> fail by default (set on_touch or mark the gate waivable in
+gates.config so it escalates to the Operator instead of hard-stopping).
+Deterministic, no network, stdlib only.
+
+Contract: see references/gate-contract.md
+Config keys (policy.gates.oversight-integrity):
+  protected        patterns for oversight files (replaces the default set)
+                   (default gates.config, policy.json, policy.schema.json,
+                    PROVENANCE.*, TEST-LOCK.json)
+  extra_protected  patterns appended to the set   (default [])
+  base_ref         git ref to diff against        (default "HEAD")
+  on_touch         "fail" | "escalate"            (default "fail")
+"""
+import fnmatch
+import os
+import subprocess
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import gatelib  # noqa: E402
+
+GATE, TIER = "oversight-integrity", 0
+DEFAULT_PROTECTED = [
+    "gates.config", "policy.json", "policy.schema.json",
+    "PROVENANCE.yaml", "PROVENANCE.yml", "PROVENANCE.json",
+    "TEST-LOCK.json",
+]
+
+
+def match_protected(paths, protected):
+    """Return the sorted subset of `paths` matching any protected pattern.
+
+    A pattern matches the normalized relative path or its basename, via fnmatch
+    (so both "policy.json" anywhere in the tree and "config/*.lock" work).
+    """
+    hits = set()
+    for p in paths:
+        norm = p.replace(os.sep, "/").lstrip("./")
+        base = norm.rsplit("/", 1)[-1]
+        for pat in protected:
+            if fnmatch.fnmatch(norm, pat) or fnmatch.fnmatch(base, pat):
+                hits.add(norm)
+                break
+    return sorted(hits)
+
+
+def git_changed_names(root, base_ref):
+    """Paths changed vs base_ref (work tree, staged+unstaged), or None if git can't answer."""
+    try:
+        proc = subprocess.run(["git", "diff", "--name-only", base_ref],
+                              cwd=root, capture_output=True, text=True)
+    except (OSError, FileNotFoundError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return [l.strip() for l in proc.stdout.splitlines() if l.strip()]
+
+
+def main():
+    _p, args = gatelib.parse_args()
+    policy = gatelib.load_policy(args)
+    opts = gatelib.gate_options(policy, GATE)
+    root = args.context or "."
+
+    protected = list(opts.get("protected") or DEFAULT_PROTECTED)
+    protected += list(opts.get("extra_protected") or [])
+    base_ref = opts.get("base_ref", "HEAD")
+    on_touch = opts.get("on_touch", "fail")
+    if on_touch not in ("fail", "escalate"):
+        on_touch = "fail"
+
+    changed = git_changed_names(root, base_ref)
+    mode = "git"
+    if changed is None:
+        changed = [rel for rel in (os.path.relpath(f, root) for f in gatelib.expand_changed(args.changed, root))]
+        mode = "lines"
+        if not changed:
+            gatelib.emit(GATE, TIER, "skip",
+                         "nothing to measure (no git diff and no --changed files)")
+
+    touched = match_protected(changed, protected)
+    if touched:
+        findings = [gatelib.finding("high", f,
+                    "Diff touches oversight file '%s'. Only the Operator changes the referee's machinery — and not inside an implementation diff." % f)
+                    for f in touched]
+        gatelib.emit(GATE, TIER, on_touch,
+                     "diff touches %d oversight file(s) (%s mode)" % (len(touched), mode),
+                     findings, confidence=1.0)
+    gatelib.emit(GATE, TIER, "pass",
+                 "no oversight files touched (%d path(s) checked, %s mode)" % (len(changed), mode),
+                 confidence=1.0)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as exc:  # noqa: BLE001
+        gatelib.fail_internal(GATE, TIER, exc)

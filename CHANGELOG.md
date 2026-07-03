@@ -3,6 +3,45 @@
 All notable changes to the `fofo` plugin are documented here. This project adheres
 to [Semantic Versioning](https://semver.org).
 
+## [1.0.0-beta.3] — 2026-07-03
+
+Agentic-integrity + SDD-interop release: closes the gaps 2026 reward-hacking
+research says are real (test tampering, oversight sabotage, silent dependency
+additions) and docks FoFo under the spec-driven-development tools (Spec Kit,
+Kiro, BMAD) instead of competing with them.
+
+### Added
+- **`test-lock`** gate (Tier 0, language-agnostic, on by default) — tamper
+  evidence for the loop's central promise. At Phase 2 exit the Judge runs
+  `test-lock --write`, hashing the test files (sha256) into `TEST-LOCK.json`;
+  from then on a modified or deleted locked test **hard-fails** and a test file
+  that appears after the lock **escalates**. "The Author never edits the tests
+  that grade it" is now a checked fact, not a procedure. Skips harmlessly until
+  a lock exists.
+- **`oversight-integrity`** gate (Tier 0, language-agnostic, on by default,
+  waivable) — the referee protects its own machinery. Fails if the diff touches
+  `gates.config`, `policy.json`, `policy.schema.json`, `PROVENANCE.*`, or
+  `TEST-LOCK.json` (patterns configurable). Git-diff mode with a `--changed`
+  fallback outside a work tree. Waivable so a deliberate Operator config change
+  escalates for sign-off instead of hard-stopping.
+- **`deps-gate`** gate (Tier 0, language-agnostic, on by default) — a new
+  dependency escalates for Operator sign-off. Name-level diff of `package.json`,
+  `requirements.txt`, `pyproject.toml`, `go.mod`, `Cargo.toml`, and `Gemfile`
+  against the git base ref. Skips outside a git work tree.
+- **`spec-adapter`** converter — imports specs authored for other SDD tools into
+  the `REQUIREMENTS.md` the loop consumes: GitHub Spec Kit `spec.md` (FR-###
+  bullets), Kiro `requirements.md` (EARS acceptance criteria), and BMAD PRDs
+  (FR#/NFR# lines). Auto-detects the format; flags requirements that arrive
+  without a verifiable criterion.
+- **EARS support in `spec-lint`** — an EARS-format criterion
+  (`WHEN <trigger> THEN the system SHALL <response>`) now satisfies a
+  requirement even without the `Acceptance:` label (`accept_ears`, default on),
+  so Kiro-style specs lint without rewriting.
+- New escalations route `review` → Operator (integrity violations and dependency
+  sign-off are human calls, not something the Author or Judge self-resolves).
+- `selftest` doubled (21 → 42 tests) covering the new gates' pure logic and all
+  three spec-adapter converters; `policy.schema.json` documents the new options.
+
 ## [1.0.0-beta.2] — 2026-06-21
 
 ### Fixed
@@ -62,5 +101,6 @@ the beta label invites real-world use and feedback before a stable 1.0.0.
 - **Docs** — README, INSTALL, gate contract, phases & roles, porting guide,
   build/design notes, and a runnable end-to-end smoke test.
 
+[1.0.0-beta.3]: https://github.com/Sweet-Papa-Technologies/Agentic-SDLC/releases/tag/fofo--v1.0.0-beta.3
 [1.0.0-beta.2]: https://github.com/Sweet-Papa-Technologies/Agentic-SDLC/releases/tag/fofo--v1.0.0-beta.2
 [1.0.0-beta.1]: https://github.com/Sweet-Papa-Technologies/Agentic-SDLC/releases/tag/fofo--v1.0.0-beta.1

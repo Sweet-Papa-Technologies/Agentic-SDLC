@@ -11,7 +11,8 @@ Offloaded from SKILL.md. The skill body is the choreography; this is the referen
 | test files | Judge | The tests, each tagged with a requirement ID (Phase 2). |
 | `src/` (or your layout) | Author | The implementation (Phase 3). |
 | `PROVENANCE.yaml` | host/orchestrator | Who authored tests vs code per unit (enables `separation-gate`). |
-| `gates.config`, `policy.json` | Operator | Orchestration and thresholds. |
+| `TEST-LOCK.json` | Judge (via `test-lock --write`) | sha256 hashes of the tests at Phase 2 exit (enables `test-lock` tamper evidence). |
+| `gates.config`, `policy.json` | Operator | Orchestration and thresholds. Protected by `oversight-integrity` — only the Operator edits them, in their own commit. |
 
 ## Conventions the gates expect
 
@@ -71,14 +72,22 @@ The Judge writes tests tagged with requirement IDs. They are red (no code yet).
 Exit: `redgreen-gate --expect red`. A red caused by a load/collection/syntax error
 (rather than missing behavior) is flagged "red for the wrong reason" and escalates.
 
+At exit, lock the tests: `test-lock --write --changed "test/**/*"` hashes them
+into `TEST-LOCK.json`. From Phase 3 on, a modified or deleted locked test is a
+hard fail (`test-lock`), and a test file that appears after the lock escalates —
+if the Judge legitimately added it, the Judge re-runs `--write`.
+
 ### Phase 3 — Implementation (Author, separate context)
 A different context writes code to green. The Author does not touch the tests.
 Exit: `redgreen-gate --expect green` (suite green).
 
 ### Phase 4 — Verification (Referee, Tier 0)
 `gate-runner` runs the enabled Tier-0 gates fail-fast in tier order:
-`trace-gate`, `intent-gate`, `redgreen-gate`, and if enabled `mutation`,
-`coverage`, `separation-gate`, `flake-gate`. One aggregate verdict; one exit code.
+`trace-gate`, `intent-gate`, `redgreen-gate`, `secret-scan`, `test-lock`
+(locked tests unchanged since Phase 2), `oversight-integrity` (the diff didn't
+touch the referee's own config/manifests), `deps-gate` (no unapproved new
+dependencies), and if enabled `mutation`, `coverage`, `separation-gate`,
+`flake-gate`. One aggregate verdict; one exit code.
 `flake-gate` re-runs the suite N times and fails on a non-deterministic result —
 run it after green, since it judges whether the green is *stable*, not whether it's
 green. Exit: all hard gates pass or escalate.
@@ -122,6 +131,7 @@ change can still ship once a human signs off on the size.
 | `redgreen-gate` (green fail), `mutation`, `lint`, `fresh-eyes-review` | `code` | **Author** |
 | `trace-gate`, `intent-gate`, `semantic-test-judge`, `separation-gate`, `flake-gate` | `tests` | **Judge** (fresh pass) |
 | `diff-budget` | `review` | **Operator** (size sign-off) |
+| `test-lock`, `oversight-integrity`, `deps-gate` | `review` | **Operator** (integrity violation / dependency sign-off — not something the Author or Judge self-resolves) |
 | `spec-lint` | `spec` | **Operator** |
 
 The Author fixes code; the Judge fixes tests. The Author never edits the tests

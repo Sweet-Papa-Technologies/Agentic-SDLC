@@ -9,7 +9,8 @@ description: >
   and only what the gates can't resolve is escalated to a human. Trigger on
   "implement", "write tests", "TDD", "build this feature", "make this pass review",
   or any spec-to-code task where test quality and review trust matter, even if not
-  explicitly asked.
+  explicitly asked. Specs authored for Spec Kit, Kiro, or BMAD import directly
+  via the bundled spec-adapter.
 ---
 
 # FoFo Agentic SDLC
@@ -37,10 +38,23 @@ cp "${CLAUDE_SKILL_DIR}/policy.json" policy.json
 ```
 
 A fresh install runs the language-agnostic gates (`spec-lint`, `trace-gate`,
-`redgreen-gate`, `intent-gate`) immediately. Heavy/BYO gates (mutation, coverage,
-lint) and the model gates are **disabled by default** — enable them in
-`gates.config` when wired up. Set `policy.gates.redgreen-gate.test_command` to the
-project's test command so red/green can run.
+`redgreen-gate`, `intent-gate`, `secret-scan`, `test-lock`, `oversight-integrity`,
+`deps-gate`) immediately. Heavy/BYO gates (mutation, coverage, lint) and the model
+gates are **disabled by default** — enable them in `gates.config` when wired up.
+Set `policy.gates.redgreen-gate.test_command` to the project's test command so
+red/green can run.
+
+**Already have a spec in another tool's format?** Import it — Spec Kit `spec.md`
+(FR-### bullets), Kiro `requirements.md` (EARS criteria), or a BMAD PRD
+(FR#/NFR# lines) convert to a `REQUIREMENTS.md` with stable IDs + acceptance
+criteria:
+
+```bash
+"${CLAUDE_SKILL_DIR}/scripts/spec-adapter" --input path/to/spec.md   # --from auto-detects
+```
+
+`spec-lint` also accepts EARS-format criteria (`WHEN <trigger> THEN the system
+SHALL <response>`) natively, so Kiro-style specs lint without rewriting.
 
 ## Roles
 
@@ -82,6 +96,12 @@ Exit gate (red, and red for the right reason):
 ```bash
 "${CLAUDE_SKILL_DIR}/scripts/redgreen-gate" --expect red --policy policy.json --context .
 ```
+Then lock the tests so later tampering is *evidence*, not suspicion:
+```bash
+"${CLAUDE_SKILL_DIR}/scripts/test-lock" --write --changed "test/**/*" --policy policy.json --context .
+```
+This hashes the Judge's test files into `TEST-LOCK.json`; from here on,
+`test-lock` fails the run if any locked test is modified or deleted.
 
 **Phase 3 — Implementation (Author, separate context).** A *different* context
 writes code to turn the suite green. The Author must not modify the tests. If a
@@ -95,10 +115,11 @@ changed files:
   --changed "src/**/* test/**/*" --context .
 ```
 This runs the enabled Tier-0 hard gates (`trace-gate`, `intent-gate`,
-`redgreen-gate`, and — if enabled — `mutation`, `coverage`, `separation-gate`,
-`flake-gate`, `diff-budget`) fail-fast in tier order and prints one aggregate JSON
-verdict. (`flake-gate` belongs here once the suite is green — it judges whether the
-green is *stable*, not whether it's green.)
+`redgreen-gate`, `secret-scan`, `test-lock`, `oversight-integrity`, `deps-gate`,
+and — if enabled — `mutation`, `coverage`, `separation-gate`, `flake-gate`,
+`diff-budget`) fail-fast in tier order and prints one aggregate JSON verdict.
+(`flake-gate` belongs here once the suite is green — it judges whether the green
+is *stable*, not whether it's green.)
 Exit: all hard gates pass, or escalate.
 
 **Phase 5 — Fresh-Eyes Review (Referee, Tier 1, third context).** With the model
@@ -123,6 +144,8 @@ When verification fails, the runner tags each escalation with a `route`:
   fresh-eyes). Fix the code.
 - `route: tests` → back to the **Judge**, in a fresh pass (trace, intent,
   semantic-test-judge, separation). Fix the tests.
+- `route: review` → to the **Operator** (test-lock tampering, oversight-integrity,
+  deps-gate, diff-budget). Integrity violations and sign-offs are human calls.
 
 **Never let the Author edit the tests that grade it.** Test problems go to the
 Judge; code problems go to the Author.
@@ -174,6 +197,10 @@ Every gate — kept or bring-your-own — obeys one I/O contract: invoked with
 [references/gate-contract.md](references/gate-contract.md).
 
 - **Kept, language-agnostic:** `spec-lint`, `trace-gate`, `redgreen-gate`,
+  `secret-scan`, `test-lock` (tamper evidence: locked test hashes must not change
+  after Phase 2), `oversight-integrity` (the diff must not touch gates.config,
+  policy.json, PROVENANCE.\*, or TEST-LOCK.json — the agent can't edit its own
+  referee), `deps-gate` (a new dependency escalates for Operator sign-off),
   `separation-gate`, `flake-gate` (re-runs the suite to catch non-determinism),
   `diff-budget` (caps changed lines so the PR stays reviewable).
 - **Kept JS/TS reference:** `intent-gate` — real-AST analysis of test quality via a

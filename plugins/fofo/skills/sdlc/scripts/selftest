@@ -56,6 +56,11 @@ diffbudget = load_gate("diff-budget")
 separation = load_gate("separation-gate")
 trace = load_gate("trace-gate")
 secretscan = load_gate("secret-scan")
+testlock = load_gate("test-lock")
+oversight = load_gate("oversight-integrity")
+depsgate = load_gate("deps-gate")
+specadapter = load_gate("spec-adapter")
+speclint = load_gate("spec-lint")
 
 
 class TestGatelib(unittest.TestCase):
@@ -186,6 +191,142 @@ class TestSecretScanPatterns(unittest.TestCase):
     def test_is_binary_detects_null_byte(self):
         self.assertTrue(secretscan.is_binary("abc\x00def"))
         self.assertFalse(secretscan.is_binary("plain text"))
+
+
+class TestTestLock(unittest.TestCase):
+    def test_compute_and_compare_roundtrip(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "a.test.js")
+            with open(p, "w") as fh:
+                fh.write("it('x', () => {});\n")
+            hashes = testlock.compute_hashes([p], d)
+            self.assertEqual(list(hashes), ["a.test.js"])
+            self.assertEqual(testlock.compare_lock(hashes, hashes), ([], [], []))
+
+    def test_compare_detects_modified_missing_new(self):
+        locked = {"a.test.js": "aaa", "b.test.js": "bbb"}
+        current = {"a.test.js": "CHANGED", "c.test.js": "ccc"}
+        modified, missing, new = testlock.compare_lock(locked, current)
+        self.assertEqual(modified, ["a.test.js"])
+        self.assertEqual(missing, ["b.test.js"])
+        self.assertEqual(new, ["c.test.js"])
+
+    def test_hash_changes_with_content(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "t.py")
+            with open(p, "w") as fh:
+                fh.write("x = 1\n")
+            h1 = testlock.hash_file(p)
+            with open(p, "a") as fh:
+                fh.write("# weakened\n")
+            self.assertNotEqual(h1, testlock.hash_file(p))
+
+
+class TestOversightIntegrity(unittest.TestCase):
+    def test_matches_basename_anywhere_in_tree(self):
+        got = oversight.match_protected(
+            ["src/app.py", "config/policy.json", "gates.config"],
+            oversight.DEFAULT_PROTECTED)
+        self.assertEqual(got, ["config/policy.json", "gates.config"])
+
+    def test_glob_patterns_match(self):
+        got = oversight.match_protected(["PROVENANCE.yaml", "TEST-LOCK.json", "notes.md"],
+                                        oversight.DEFAULT_PROTECTED)
+        self.assertEqual(got, ["PROVENANCE.yaml", "TEST-LOCK.json"])
+
+    def test_clean_paths_do_not_match(self):
+        self.assertEqual(oversight.match_protected(["src/a.py", "test/a_test.py"],
+                                                   oversight.DEFAULT_PROTECTED), [])
+
+
+class TestDepsParsers(unittest.TestCase):
+    def test_package_json_all_dep_sections(self):
+        text = '{"dependencies": {"express": "^4"}, "devDependencies": {"jest": "^29"}}'
+        self.assertEqual(depsgate.parse_package_json(text), {"express", "jest"})
+
+    def test_package_json_garbage_is_empty(self):
+        self.assertEqual(depsgate.parse_package_json("not json"), set())
+
+    def test_requirements_txt_strips_specifiers_and_comments(self):
+        text = "requests>=2.0  # http\nflask==3.0\n-r base.txt\nnumpy[extra]~=1.26\n"
+        self.assertEqual(depsgate.parse_requirements_txt(text), {"requests", "flask", "numpy"})
+
+    def test_pyproject_array_and_poetry_table(self):
+        text = ('[project]\ndependencies = ["httpx>=0.27", "pydantic"]\n'
+                '[tool.poetry.dependencies]\npython = "^3.11"\nrich = "*"\n')
+        self.assertEqual(depsgate.parse_pyproject_toml(text), {"httpx", "pydantic", "rich"})
+
+    def test_go_mod_block_and_single(self):
+        text = ("module x\nrequire github.com/pkg/errors v0.9.1\n"
+                "require (\n\tgolang.org/x/text v0.14.0\n)\n")
+        self.assertEqual(depsgate.parse_go_mod(text),
+                         {"github.com/pkg/errors", "golang.org/x/text"})
+
+    def test_cargo_toml_sections_only(self):
+        text = ('[package]\nname = "mycrate"\n[dependencies]\nserde = "1"\n'
+                '[dev-dependencies]\ntempfile = "3"\n')
+        self.assertEqual(depsgate.parse_cargo_toml(text), {"serde", "tempfile"})
+
+    def test_gemfile(self):
+        self.assertEqual(depsgate.parse_gemfile('source "x"\ngem "rails"\n  gem \'pry\'\n'),
+                         {"rails", "pry"})
+
+
+class TestSpecAdapter(unittest.TestCase):
+    KIRO = ("## Requirements\n\n### Requirement 1\n\n"
+            "**User Story:** As a user, I want to log in, so that I see my data.\n\n"
+            "#### Acceptance Criteria\n\n"
+            "1. WHEN credentials are valid THEN the system SHALL create a session\n")
+    SPECKIT = "- **FR-001**: System MUST allow account creation\n"
+    BMAD = "### Functional\n- FR1: The dashboard shall load fast\n- NFR1: The system shall scale\n"
+
+    def test_detect_format(self):
+        self.assertEqual(specadapter.detect_format(self.KIRO), "kiro")
+        self.assertEqual(specadapter.detect_format(self.SPECKIT), "spec-kit")
+        self.assertEqual(specadapter.detect_format(self.BMAD), "bmad")
+        self.assertIsNone(specadapter.detect_format("just prose"))
+
+    def test_kiro_title_from_want_clause_not_raw_line(self):
+        reqs = specadapter.convert_kiro(self.KIRO)
+        self.assertEqual(len(reqs), 1)
+        self.assertEqual(reqs[0]["title"], "to log in")
+        self.assertEqual(len(reqs[0]["acceptance"]), 1)
+        self.assertIn("SHALL create a session", reqs[0]["acceptance"][0])
+
+    def test_spec_kit_keeps_source_id(self):
+        reqs = specadapter.convert_spec_kit(self.SPECKIT)
+        self.assertEqual(reqs[0]["source"], "FR-001")
+        self.assertEqual(reqs[0]["acceptance"], ["System MUST allow account creation"])
+
+    def test_bmad_numbers_fr_and_nfr_sequentially(self):
+        reqs = specadapter.convert_bmad(self.BMAD)
+        self.assertEqual([r["source"] for r in reqs], ["FR1", "NFR1"])
+
+    def test_render_output_satisfies_spec_lint_conventions(self):
+        rendered, warnings = specadapter.render(
+            specadapter.convert_bmad(self.BMAD), "bmad", "prd.md")
+        self.assertIn("### REQ-001:", rendered)
+        self.assertIn("### REQ-002:", rendered)
+        self.assertIn("Acceptance:", rendered)
+        self.assertEqual(warnings, [])
+
+    def test_render_warns_when_no_criterion(self):
+        rendered, warnings = specadapter.render(
+            [{"title": "Vague", "story": None, "acceptance": []}], "kiro", "r.md")
+        self.assertIn("Acceptance: TODO", rendered)
+        self.assertEqual(len(warnings), 1)
+
+
+class TestSpecLintEars(unittest.TestCase):
+    def test_ears_line_matches(self):
+        self.assertTrue(speclint.EARS_RE.search(
+            "WHEN the user submits a valid email THEN the system SHALL send a link"))
+        self.assertTrue(speclint.EARS_RE.search(
+            "while a session is idle the system shall invalidate it"))
+
+    def test_plain_must_prose_does_not_match(self):
+        self.assertIsNone(speclint.EARS_RE.search("The parser must reject empty input."))
+        self.assertIsNone(speclint.EARS_RE.search("If unsure, ask the operator."))
 
 
 if __name__ == "__main__":
